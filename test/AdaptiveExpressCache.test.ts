@@ -39,12 +39,12 @@ describe('Adaptive Express Cache', () => {
     vi.restoreAllMocks()
   })
 
-  describe('cacheSuccess', () => {
+  describe('cache helper (success)', () => {
     it('should cache successful responses', async () => {
       const app = express()
       let callCount = 0
 
-      app.get('/test', cacheModule.cacheSuccess('10 seconds'), (req, res) => {
+      app.get('/test', cacheModule.adaptiveExpressCache(cacheModule.cache('10 seconds')), (req, res) => {
         callCount++
         res.json({ value: 'success' })
       })
@@ -62,7 +62,7 @@ describe('Adaptive Express Cache', () => {
       const app = express()
       let callCount = 0
 
-      app.get('/error', cacheModule.cacheSuccess('10 seconds'), (req, res) => {
+      app.get('/error', cacheModule.adaptiveExpressCache(cacheModule.cache('10 seconds')), (req, res) => {
         callCount++
         res.status(500).json({ error: 'fail' })
       })
@@ -80,7 +80,7 @@ describe('Adaptive Express Cache', () => {
       const app = express()
       let callCount = 0
 
-      app.get('/any', cacheModule.cache('10 seconds'), (req, res) => {
+      app.get('/any', cacheModule.adaptiveExpressCache(cacheModule.cache('10 seconds')), (req, res) => {
         callCount++
         res.status(400).json({ value: 'bad request' })
       })
@@ -92,70 +92,22 @@ describe('Adaptive Express Cache', () => {
       expect(callCount).toBe(2)
     })
 
-    it('should parse duration strings correctly', async () => {
-      const app = express()
-
-      // Test seconds
-      app.get('/seconds', cacheModule.cache('10 seconds'), (req, res) => {
-        res.json({ ok: true })
-      })
-      await request(app).get('/seconds').expect(200)
-
-      // Test minutes
-      app.get('/minutes', cacheModule.cache('5 minutes'), (req, res) => {
-        res.json({ ok: true })
-      })
-      await request(app).get('/minutes').expect(200)
-
-      // Test hours
-      app.get('/hours', cacheModule.cache('1 hour'), (req, res) => {
-        res.json({ ok: true })
-      })
-      await request(app).get('/hours').expect(200)
-
-      // Test days
-      app.get('/days', cacheModule.cache('1 day'), (req, res) => {
-        res.json({ ok: true })
-      })
-      await request(app).get('/days').expect(200)
-
-      // Test no unit
-      app.get('/nounit', cacheModule.cache('100'), (req, res) => {
-        res.json({ ok: true })
-      })
-      await request(app).get('/nounit').expect(200)
-
-      // Test unknown unit (fallback)
-      app.get('/unknown', cacheModule.cache('10 unknown'), (req, res) => {
-        res.json({ ok: true })
-      })
-      await request(app).get('/unknown').expect(200)
-    })
-
-    it('should accept number as duration', async () => {
-      const app = express()
-      app.get('/number-duration', cacheModule.cache(10), (req, res) => {
-        res.json({ ok: true })
-      })
-      await request(app).get('/number-duration').expect(200)
-    })
-
     it('should fallback to default duration for invalid types', async () => {
       const app = express()
       // @ts-ignore
-      app.get('/invalid-duration', cacheModule.cache(true), (req, res) => {
+      app.get('/invalid-duration', cacheModule.adaptiveExpressCache(cacheModule.cache(true)), (req, res) => {
         res.json({ ok: true })
       })
       await request(app).get('/invalid-duration').expect(200)
     })
   })
 
-  describe('adaptiveCache', () => {
+  describe('adaptiveExpressCache', () => {
     it('should cache and return headers', async () => {
       const app = express()
       let callCount = 0
 
-      app.get('/adaptive', cacheModule.adaptiveCache({ initialTTL: 10 }), (req, res) => {
+      app.get('/adaptive', cacheModule.adaptiveExpressCache({ initialTTL: 10 }), (req, res) => {
         callCount++
         res.json({ foo: 'bar' })
       })
@@ -179,7 +131,7 @@ describe('Adaptive Express Cache', () => {
 
     it('should support debug headers', async () => {
       const app = express()
-      app.get('/debug', cacheModule.adaptiveCache({ includeDebugHeaders: true }), (req, res) => {
+      app.get('/debug', cacheModule.adaptiveExpressCache({ includeDebugHeaders: true }), (req, res) => {
         res.json({ debug: true })
       })
 
@@ -195,7 +147,7 @@ describe('Adaptive Express Cache', () => {
     it('should force refresh via query param', async () => {
       const app = express()
       let callCount = 0
-      app.get('/refresh', cacheModule.adaptiveCache(), (req, res) => {
+      app.get('/refresh', cacheModule.adaptiveExpressCache(), (req, res) => {
         callCount++
         res.json({ count: callCount })
       })
@@ -217,7 +169,7 @@ describe('Adaptive Express Cache', () => {
       const app = express()
       app.get(
         '/maxttl',
-        cacheModule.adaptiveCache({
+        cacheModule.adaptiveExpressCache({
           maxTTL: (body) => {
             const data = typeof body === 'string' ? JSON.parse(body) : body
             return data.ttl
@@ -234,7 +186,7 @@ describe('Adaptive Express Cache', () => {
 
     it('should compress data by default', async () => {
       const app = express()
-      app.get('/compress', cacheModule.adaptiveCache({ compress: true }), (req, res) => {
+      app.get('/compress', cacheModule.adaptiveExpressCache({ compress: true }), (req, res) => {
         res.json({ large: 'data'.repeat(100) })
       })
 
@@ -247,7 +199,7 @@ describe('Adaptive Express Cache', () => {
 
     it('should handle compression disabled', async () => {
       const app = express()
-      app.get('/no-compress', cacheModule.adaptiveCache({ compress: false }), (req, res) => {
+      app.get('/no-compress', cacheModule.adaptiveExpressCache({ compress: false }), (req, res) => {
         res.json({ data: 'raw' })
       })
 
@@ -266,7 +218,7 @@ describe('Adaptive Express Cache', () => {
       )
 
       let callCount = 0
-      app.get('/redis-error', cacheModule.adaptiveCache(), (req, res) => {
+      app.get('/redis-error', cacheModule.adaptiveExpressCache(), (req, res) => {
         callCount++
         res.json({ ok: true })
       })
@@ -282,7 +234,7 @@ describe('Adaptive Express Cache', () => {
       vi.spyOn(cacheModule.getDefaultCache().client, 'adaptiveCacheFetch').mockResolvedValue(['not-gzipped-json', 10])
 
       let callCount = 0
-      app.get('/corrupt', cacheModule.adaptiveCache(), (req, res) => {
+      app.get('/corrupt', cacheModule.adaptiveExpressCache(), (req, res) => {
         callCount++
         res.json({ ok: true })
       })
@@ -303,7 +255,7 @@ describe('Adaptive Express Cache', () => {
         new Error('Update failed'),
       )
 
-      app.get('/update-fail', cacheModule.adaptiveCache(), (req, res) => {
+      app.get('/update-fail', cacheModule.adaptiveExpressCache(), (req, res) => {
         res.json({ ok: true })
       })
 
@@ -318,7 +270,7 @@ describe('Adaptive Express Cache', () => {
 
     it('should respect includeHeaders: false', async () => {
       const app = express()
-      app.get('/no-headers', cacheModule.adaptiveCache({ includeHeaders: false }), (req, res) => {
+      app.get('/no-headers', cacheModule.adaptiveExpressCache({ includeHeaders: false }), (req, res) => {
         res.json({ ok: true })
       })
       const res = await request(app).get('/no-headers').expect(200)
@@ -327,7 +279,7 @@ describe('Adaptive Express Cache', () => {
 
     it('should handle missing metadata with debug headers', async () => {
       const app = express()
-      app.get('/debug-missing', cacheModule.adaptiveCache({ includeDebugHeaders: true }), (req, res) => {
+      app.get('/debug-missing', cacheModule.adaptiveExpressCache({ includeDebugHeaders: true }), (req, res) => {
         res.json({ debug: true })
       })
 
@@ -349,7 +301,7 @@ describe('Adaptive Express Cache', () => {
 
     it('should handle missing lastChanged in metadata', async () => {
       const app = express()
-      app.get('/missing-last-changed', cacheModule.adaptiveCache({ includeDebugHeaders: true }), (req, res) => {
+      app.get('/missing-last-changed', cacheModule.adaptiveExpressCache({ includeDebugHeaders: true }), (req, res) => {
         res.json({ ok: true })
       })
 
@@ -374,7 +326,7 @@ describe('Adaptive Express Cache', () => {
       const app = express()
       app.get(
         '/maxttl-default',
-        cacheModule.adaptiveCache({
+        cacheModule.adaptiveExpressCache({
           maxTTL: () => undefined,
           logLevel: 'debug',
         }),
@@ -389,7 +341,7 @@ describe('Adaptive Express Cache', () => {
 
     it('should respect includeHeaders: false on HIT', async () => {
       const app = express()
-      app.get('/no-headers-hit', cacheModule.adaptiveCache({ includeHeaders: false }), (req, res) => {
+      app.get('/no-headers-hit', cacheModule.adaptiveExpressCache({ includeHeaders: false }), (req, res) => {
         res.json({ ok: true })
       })
       // Miss
@@ -402,7 +354,7 @@ describe('Adaptive Express Cache', () => {
 
     it('should handle object body in res.send', async () => {
       const app = express()
-      app.get('/obj-send', cacheModule.adaptiveCache(), (req, res) => {
+      app.get('/obj-send', cacheModule.adaptiveExpressCache(), (req, res) => {
         res.send({ data: 'obj' })
       })
 
@@ -411,7 +363,7 @@ describe('Adaptive Express Cache', () => {
 
     it('should handle errors during cache hit response', async () => {
       const app = express()
-      app.get('/hit-error', cacheModule.adaptiveCache(), (req, res) => {
+      app.get('/hit-error', cacheModule.adaptiveExpressCache(), (req, res) => {
         res.json({ ok: true })
       })
 
@@ -431,7 +383,7 @@ describe('Adaptive Express Cache', () => {
         next()
       })
 
-      app2.get('/hit-error-2', cacheModule.adaptiveCache(), (req, res) => {
+      app2.get('/hit-error-2', cacheModule.adaptiveExpressCache(), (req, res) => {
         res.json({ ok: true })
       })
 
@@ -449,7 +401,7 @@ describe('Adaptive Express Cache', () => {
     it('should clear the cache', async () => {
       const app = express()
       let callCount = 0
-      app.get('/clear', cacheModule.adaptiveCache(), (req, res) => {
+      app.get('/clear', cacheModule.adaptiveExpressCache(), (req, res) => {
         callCount++
         res.json({ val: 1 })
       })
@@ -470,7 +422,7 @@ describe('Adaptive Express Cache', () => {
   describe('Cache Tags Middleware', () => {
     it('should apply static tags from options', async () => {
       const app = express()
-      app.get('/static-tags', cacheModule.adaptiveCache({ tags: ['static-tag'] }), (req, res) => {
+      app.get('/static-tags', cacheModule.adaptiveExpressCache({ tags: ['static-tag'] }), (req, res) => {
         res.json({ ok: true })
       })
 
@@ -489,7 +441,7 @@ describe('Adaptive Express Cache', () => {
       const app = express()
       app.get(
         '/dynamic-tags/:id',
-        cacheModule.adaptiveCache({
+        cacheModule.adaptiveExpressCache({
           tags: (req) => [`user:${req.params.id}`],
         }),
         (req, res) => {
@@ -510,7 +462,7 @@ describe('Adaptive Express Cache', () => {
       app.get(
         '/invalid-tags',
         // @ts-ignore invalid array arg
-        cacheModule.adaptiveCache({ tags: 'not-an-array-or-function' }),
+        cacheModule.adaptiveExpressCache({ tags: 'not-an-array-or-function' }),
         (req, res) => {
           res.json({ ok: true })
         },
@@ -525,7 +477,7 @@ describe('Adaptive Express Cache', () => {
 
     app.get(
       '/tags-fn',
-      cacheModule.adaptiveCache({
+      cacheModule.adaptiveExpressCache({
         tags: (req) => {
           return ['express-dynamic-tag']
         },
@@ -546,11 +498,11 @@ describe('Adaptive Express Cache', () => {
     const app = express()
 
     // Call without arguments to trigger default parameter
-    app.get('/default-cache', cacheModule.cache(), (req, res) => {
+    app.get('/default-cache', cacheModule.adaptiveExpressCache(cacheModule.cache()), (req, res) => {
       res.json({ ok: true })
     })
 
-    app.get('/default-cache-success', cacheModule.cacheSuccess(), (req, res) => {
+    app.get('/default-cache-success', cacheModule.adaptiveExpressCache(cacheModule.cache()), (req, res) => {
       res.json({ ok: true })
     })
 

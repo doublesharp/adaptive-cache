@@ -35,7 +35,7 @@ describe('Adaptive Fastify Cache', () => {
     const fastify = Fastify()
     let callCount = 0
 
-    fastify.register(cacheModule.adaptiveFastifyCache({ initialTTL: 10 }))
+    fastify.register(cacheModule.adaptiveFastifyCache(cacheModule.cache('10 seconds')))
 
     fastify.get('/test', async (req, reply) => {
       callCount++

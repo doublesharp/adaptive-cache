@@ -37,6 +37,10 @@ describe('utils', () => {
       expect(parseDuration('invalid')).toBe(5)
     })
 
+    it('should return default for unknown unit', () => {
+      expect(parseDuration('1 week')).toBe(5)
+    })
+
     it('should handle invalid types in parseDuration', async () => {
       const { parseDuration } = await import('../src/utils')
       expect(parseDuration(true as any)).toBe(5)

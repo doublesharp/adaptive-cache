@@ -1,18 +1,10 @@
 import { NextFunction, Request, Response } from 'express'
 import { AdaptiveCache } from './AdaptiveCache'
 import { getDefaultCache } from './singleton'
-import { parseDuration, getAdaptiveCacheKey } from './utils'
+import { getAdaptiveCacheKey } from './utils'
 import { AdaptiveCacheOptions } from './types'
 
 const DEFAULT_MAX_TTL = 60 * 15 // 15 minutes for adaptive cache
-const cacheTime = process.env.CACHE_TIME || '5 seconds'
-
-export function cacheSuccess(time: string | number = cacheTime) {
-  return adaptiveExpressCache({ initialTTL: parseDuration(time) })
-}
-export function cache(time: string | number = cacheTime) {
-  return adaptiveExpressCache({ initialTTL: parseDuration(time) })
-}
 
 // Adaptive caching middleware
 export const adaptiveExpressCache = (

@@ -125,7 +125,7 @@ describe('AdaptiveCache Class & Utils', () => {
 
     it('should set default lock expiration from options', async () => {
       const spy = vi.spyOn(cacheModule.AdaptiveCache, 'setDefaultLockExpirationSeconds')
-      cacheModule.adaptiveCache({ lockExpirationSeconds: 123 })
+      cacheModule.adaptiveExpressCache({ lockExpirationSeconds: 123 })
       expect(spy).toHaveBeenCalledWith(123)
     })
   })
@@ -245,9 +245,7 @@ describe('AdaptiveCache Class & Utils', () => {
       expect(cacheModule.AdaptiveCache).toBeDefined()
       expect(cacheModule.getDefaultCache).toBeDefined()
       expect(cacheModule.redis).toBeDefined()
-      expect(cacheModule.adaptiveCache).toBeDefined()
-      expect(cacheModule.cache).toBeDefined()
-      expect(cacheModule.cacheSuccess).toBeDefined()
+      expect(cacheModule.adaptiveExpressCache).toBeDefined()
       expect(cacheModule.clearAdaptiveCache).toBeDefined()
       expect(cacheModule.adaptiveFastifyCache).toBeDefined()
       expect(cacheModule.cacheResult).toBeDefined()
