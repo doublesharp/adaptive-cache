@@ -8,14 +8,14 @@ const DEFAULT_MAX_TTL = 60 * 15 // 15 minutes for adaptive cache
 const cacheTime = process.env.CACHE_TIME || '5 seconds'
 
 export function cacheSuccess(time: string | number = cacheTime) {
-  return adaptiveCache({ initialTTL: parseDuration(time) })
+  return adaptiveExpressCache({ initialTTL: parseDuration(time) })
 }
 export function cache(time: string | number = cacheTime) {
-  return adaptiveCache({ initialTTL: parseDuration(time) })
+  return adaptiveExpressCache({ initialTTL: parseDuration(time) })
 }
 
 // Adaptive caching middleware
-export const adaptiveCache = (
+export const adaptiveExpressCache = (
   options: AdaptiveCacheOptions & {
     tags?: string[] | ((req: Request) => string[])
   } = {},

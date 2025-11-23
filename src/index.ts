@@ -1,12 +1,12 @@
 import { AdaptiveCacheOptions } from './types'
 import { AdaptiveCache } from './AdaptiveCache'
 import { getDefaultCache, redis } from './singleton'
-import { adaptiveCache, cache, cacheSuccess, clearAdaptiveCache } from './AdaptiveExpressCache'
+import { adaptiveExpressCache, cache, cacheSuccess, clearAdaptiveCache } from './AdaptiveExpressCache'
 import { adaptiveFastifyCache } from './AdaptiveFastifyCache'
 
 export { AdaptiveCacheOptions, AdaptiveCache }
 export { getDefaultCache, redis }
-export { adaptiveCache, cache, cacheSuccess, clearAdaptiveCache, adaptiveFastifyCache }
+export { adaptiveExpressCache as adaptiveCache, cache, cacheSuccess, clearAdaptiveCache, adaptiveFastifyCache }
 
 // Util to easily cache functions outside of the controller flow
 export const cacheResult = async (key: string, timeInSeconds: number, callback: () => Promise<any>) => {
