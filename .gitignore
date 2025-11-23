@@ -1,0 +1,25 @@
+# pnpm
+pnpm-error.log
+
+# Editor and OS files
+.DS_Store
+.idea
+npm-debug.log
+yarn-debug.log
+yarn-error.log
+.yalc
+.pnp
+.DS_Store
+
+# Coverage files
+coverage
+coverage.json
+
+# Environment
+.env
+.vscode
+.cache
+
+node_modules
+
+dist

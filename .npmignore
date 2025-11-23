@@ -1,0 +1,48 @@
+# Dependencies
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# Source files
+src/
+tsconfig.json
+jest.config.js
+.eslintrc*
+.prettierrc*
+
+# Development files
+*.test.ts
+
+# Build tools
+.github/
+.gitignore
+.editorconfig
+
+# Environment
+.env
+.env.local
+.nvmrc
+.gitattributes
+coverage/
+coverage.json
+
+docker-compose.yml
+tsup.config.ts
+vitest.config.ts
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Documentation
+README.md
+CHANGELOG.md
+
+# Only publish dist/
+!dist/
