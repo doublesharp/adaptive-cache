@@ -94,7 +94,7 @@ describe('Adaptive Express Cache', () => {
 
     it('should fallback to default duration for invalid types', async () => {
       const app = express()
-      // @ts-ignore
+      // @ts-expect-error invalid duration type
       app.get('/invalid-duration', cacheModule.adaptiveExpressCache(cacheModule.cache(true)), (req, res) => {
         res.json({ ok: true })
       })
@@ -458,10 +458,9 @@ describe('Adaptive Express Cache', () => {
 
     it('should handle invalid tags type gracefully', async () => {
       const app = express()
-      // @ts-ignore
       app.get(
         '/invalid-tags',
-        // @ts-ignore invalid array arg
+        // @ts-expect-error invalid tags type
         cacheModule.adaptiveExpressCache({ tags: 'not-an-array-or-function' }),
         (req, res) => {
           res.json({ ok: true })
@@ -478,7 +477,7 @@ describe('Adaptive Express Cache', () => {
     app.get(
       '/tags-fn',
       cacheModule.adaptiveExpressCache({
-        tags: (req) => {
+        tags: (_req) => {
           return ['express-dynamic-tag']
         },
       }),

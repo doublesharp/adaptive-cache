@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { parseDuration, getAdaptiveCacheKey } from '../src/utils'
+import { cache, parseDuration, getAdaptiveCacheKey } from '../src/utils'
 
 describe('utils', () => {
   describe('parseDuration', () => {
@@ -54,6 +54,13 @@ describe('utils', () => {
     it('should generate key', () => {
       const key = getAdaptiveCacheKey('/path', { q: 1 }, 'prefix:')
       expect(key).toContain('prefix:/path:')
+    })
+  })
+
+  describe('cache', () => {
+    it('should return adaptive cache options from a duration', () => {
+      expect(cache('2 minutes')).toEqual({ initialTTL: 120 })
+      expect(cache(15)).toEqual({ initialTTL: 15 })
     })
   })
 })

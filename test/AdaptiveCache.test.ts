@@ -7,6 +7,23 @@ let cacheModule: typeof import('../src')
 let redisClient: Redis
 let container: StartedTestContainer
 
+const waitFor = async (assertion: () => void | Promise<void>, timeoutMs = 2000) => {
+  const start = Date.now()
+  let lastError: unknown
+
+  while (Date.now() - start < timeoutMs) {
+    try {
+      await assertion()
+      return
+    } catch (err) {
+      lastError = err
+      await new Promise((resolve) => setTimeout(resolve, 25))
+    }
+  }
+
+  throw lastError
+}
+
 describe('AdaptiveCache Class & Utils', () => {
   beforeAll(async () => {
     // Start Redis container
@@ -86,6 +103,38 @@ describe('AdaptiveCache Class & Utils', () => {
   })
 
   describe('Lua Scripts', () => {
+    it('adaptive cache lua scripts should preserve old tuple fields and include metadata', async () => {
+      const cache = new cacheModule.AdaptiveCache({ initialTTL: 10, includeDebugHeaders: true })
+
+      await cache.set('lua-tuple-key', { a: 1 })
+
+      const fetchTuple = await redisClient.adaptiveCacheFetch('lua-tuple-keydata')
+      expect(fetchTuple[0]).toEqual(expect.any(String))
+      expect(fetchTuple[1]).toEqual(expect.any(Number))
+      expect(fetchTuple[2]).toBeDefined()
+      expect(fetchTuple[3]).toBeDefined()
+      expect(fetchTuple[4]).toBeDefined()
+      expect(fetchTuple[5]).toEqual(expect.any(String))
+
+      const updateTuple = await redisClient.adaptiveCacheUpdate(
+        'lua-direct-keydata',
+        'lua-direct-keymeta',
+        'hash-1',
+        JSON.stringify({ ok: true }),
+        '5',
+        '30',
+        '2',
+        '60',
+      )
+
+      expect(updateTuple[0]).toBe('CACHED')
+      expect(updateTuple[1]).toEqual(expect.any(Number))
+      expect(updateTuple[2]).toBeDefined()
+      expect(updateTuple[3]).toBeDefined()
+      expect(updateTuple[4]).toBe('hash-1')
+      expect(updateTuple[5]).toBe(1)
+    })
+
     it('shouldRefreshCache should manage locks', async () => {
       const lastUpdateKey = 'test-update-key'
       const refreshThreshold = 10
@@ -96,7 +145,7 @@ describe('AdaptiveCache Class & Utils', () => {
       expect(lockVal).toBeDefined()
 
       // Second call immediately, should be UPDATING (locked)
-      const [shouldRefresh2, lockVal2] = await cacheModule.shouldRefreshCache(lastUpdateKey, refreshThreshold)
+      const [shouldRefresh2] = await cacheModule.shouldRefreshCache(lastUpdateKey, refreshThreshold)
       expect(shouldRefresh2).toBe('UPDATING')
 
       // Release lock
@@ -354,6 +403,128 @@ describe('AdaptiveCache Class & Utils', () => {
       expect(cache.client.options.host).toBe('localhost')
 
       cache.quit()
+    })
+  })
+
+  describe('L1 Redis backend', () => {
+    it('should write L1 immediately and reconcile Redis asynchronously', async () => {
+      const cache = new cacheModule.AdaptiveCache(
+        {
+          backend: 'l1-redis',
+          initialTTL: 2,
+          maxTTL: 20,
+          includeDebugHeaders: true,
+          lru: {
+            namespace: 'adaptive-cache-test-l1-write',
+            maxSizeBytes: 1024 * 1024,
+          },
+        },
+        cacheModule.getDefaultCache().client,
+      )
+
+      await cache.set('l1-write-key', { val: 1 })
+
+      const immediate = await cache.get('l1-write-key')
+      expect(immediate?.data).toEqual({ val: 1 })
+      expect(Number(immediate?.metadata.dataTTL)).toBe(2)
+
+      await waitFor(async () => {
+        const meta = await redisClient.hgetall('l1-write-keymeta')
+        expect(meta.hash).toBeTruthy()
+      })
+
+      await cache.quit()
+    })
+
+    it('should hydrate L1 after a Redis fallback hit', async () => {
+      const redisOnly = new cacheModule.AdaptiveCache({ initialTTL: 10 }, cacheModule.getDefaultCache().client)
+      await redisOnly.set('l1-hydrate-key', { val: 1 })
+
+      const cache = new cacheModule.AdaptiveCache(
+        {
+          backend: 'l1-redis',
+          initialTTL: 10,
+          lru: {
+            namespace: 'adaptive-cache-test-l1-hydrate',
+            maxSizeBytes: 1024 * 1024,
+          },
+        },
+        cacheModule.getDefaultCache().client,
+      )
+
+      const first = await cache.get('l1-hydrate-key')
+      expect(first?.data).toEqual({ val: 1 })
+
+      const fetchSpy = vi.spyOn(cache.client, 'adaptiveCacheFetch')
+      const second = await cache.get('l1-hydrate-key')
+
+      expect(second?.data).toEqual({ val: 1 })
+      expect(fetchSpy).not.toHaveBeenCalled()
+
+      await cache.quit()
+    })
+
+    it('should keep short-lived L1 data when async Redis update fails', async () => {
+      const cache = new cacheModule.AdaptiveCache(
+        {
+          backend: 'l1-redis',
+          initialTTL: 2,
+          lru: {
+            namespace: 'adaptive-cache-test-l1-redis-fail',
+            maxSizeBytes: 1024 * 1024,
+          },
+        },
+        cacheModule.getDefaultCache().client,
+      )
+      vi.spyOn(cache.client, 'adaptiveCacheUpdate').mockRejectedValueOnce(new Error('redis update failed'))
+
+      await cache.set('l1-redis-fail-key', { val: 1 })
+
+      const result = await cache.get('l1-redis-fail-key')
+      expect(result?.data).toEqual({ val: 1 })
+
+      await cache.quit()
+    })
+
+    it('should publish invalidations across L1 namespaces', async () => {
+      const cacheA = new cacheModule.AdaptiveCache(
+        {
+          backend: 'l1-redis',
+          initialTTL: 10,
+          lru: {
+            namespace: 'adaptive-cache-test-l1-pub-a',
+            maxSizeBytes: 1024 * 1024,
+          },
+        },
+        cacheModule.getDefaultCache().client,
+      )
+      const cacheB = new cacheModule.AdaptiveCache(
+        {
+          backend: 'l1-redis',
+          initialTTL: 10,
+          lru: {
+            namespace: 'adaptive-cache-test-l1-pub-b',
+            maxSizeBytes: 1024 * 1024,
+          },
+        },
+        cacheModule.getDefaultCache().client,
+      )
+
+      await cacheA.set('l1-pub-key', { val: 1 })
+      await waitFor(async () => {
+        const meta = await redisClient.hgetall('l1-pub-keymeta')
+        expect(meta.hash).toBeTruthy()
+      })
+
+      expect((await cacheB.get('l1-pub-key'))?.data).toEqual({ val: 1 })
+      await cacheA.clear('l1-pub-key')
+
+      await waitFor(async () => {
+        expect(await cacheB.get('l1-pub-key')).toBeNull()
+      })
+
+      await cacheA.quit()
+      await cacheB.quit()
     })
   })
 

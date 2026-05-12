@@ -37,7 +37,7 @@ describe('Adaptive Fastify Cache', () => {
 
     fastify.register(cacheModule.adaptiveFastifyCache(cacheModule.cache('10 seconds')))
 
-    fastify.get('/test', async (req, reply) => {
+    fastify.get('/test', async () => {
       callCount++
       return { value: 'success' }
     })
@@ -218,7 +218,7 @@ describe('Adaptive Fastify Cache', () => {
     const fastify = Fastify()
     fastify.register(
       cacheModule.adaptiveFastifyCache({
-        maxTTL: (body) => {
+        maxTTL: (_body) => {
           return 123 // Return a specific TTL
         },
         logLevel: 'debug',
@@ -239,7 +239,7 @@ describe('Adaptive Fastify Cache', () => {
     const fastify = Fastify()
     fastify.register(
       cacheModule.adaptiveFastifyCache({
-        tags: (req) => {
+        tags: (_req) => {
           return ['dynamic-tag']
         },
       }),
@@ -386,7 +386,7 @@ describe('Adaptive Fastify Cache', () => {
 
   it('should handle invalid tags type', async () => {
     const fastify = Fastify()
-    // @ts-ignore
+    // @ts-expect-error invalid tags type
     fastify.register(cacheModule.adaptiveFastifyCache({ tags: 'invalid' }))
 
     fastify.get('/invalid-tags', async () => {
