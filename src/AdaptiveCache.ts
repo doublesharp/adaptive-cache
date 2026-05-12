@@ -1,10 +1,11 @@
 import Redis from 'ioredis'
-import fs from 'node:fs'
-import path from 'node:path'
 import crypto from 'node:crypto'
 import zlib from 'node:zlib'
 import { Logger } from './lib/logger'
-import { AdaptiveCacheOptions } from './types'
+import { ClusteredLruAdaptiveCacheBackend } from './backends/ClusteredLruAdaptiveCacheBackend'
+import { L1RedisAdaptiveCacheBackend } from './backends/L1RedisAdaptiveCacheBackend'
+import { RedisAdaptiveCacheBackend } from './backends/RedisAdaptiveCacheBackend'
+import { AdaptiveCacheBackend, AdaptiveCacheOptions } from './types'
 
 const DEFAULT_MAX_TTL = 60 * 15 // 15 minutes
 
@@ -15,58 +16,54 @@ export class AdaptiveCache {
     AdaptiveCache.DEFAULT_LOCK_EXPIRATION_SECONDS = secs
   }
 
-  public client: Redis
   public logger: Logger
   private options: AdaptiveCacheOptions
+  private backend: AdaptiveCacheBackend
+  private redisClient?: Redis
 
   constructor(options: AdaptiveCacheOptions = {}, client?: Redis) {
     this.options = options
     this.logger = new Logger(options.logLevel || 'info')
-
-    if (client) {
-      this.client = client
-    } else {
-      const redisURL = process.env.REDIS_TLS_URL || process.env.REDIS_URL
-      const redisParams = process.env.NODE_ENV === 'production' ? { tls: { rejectUnauthorized: false } } : {}
-
-      this.client = redisURL
-        ? new Redis(redisURL, redisParams)
-        : new Redis({
-            host: process.env.REDIS_HOST || 'localhost',
-            port: process.env.REDIS_PORT ? parseInt(process.env.REDIS_PORT) : 6379,
-          })
-    }
-
-    this.defineLuaScripts()
-
-    // Handle Redis connection errors to prevent unhandled error events
-    // Only attach if we created the client, or if it's a new client instance
-    if (!client) {
-      this.client.on('error', (err) => {
-        this.logger.error('Redis client error:', err)
-      })
-    }
+    this.backend = this.createBackend(options, client)
   }
 
-  private defineLuaScripts() {
-    // We need to handle the path correctly. Assuming this file is in src/
-    const luaPath = path.resolve(__dirname, './redis-lua')
+  public get client(): Redis {
+    if (!this.redisClient) {
+      throw new Error('This AdaptiveCache instance is not using a Redis-backed backend.')
+    }
+    return this.redisClient
+  }
 
-    const scripts = {
-      adaptiveCacheFetch: { numberOfKeys: 1, file: 'adaptiveCacheFetch.lua' },
-      adaptiveCacheUpdate: { numberOfKeys: 2, file: 'adaptiveCacheUpdate.lua' },
-      shouldRefreshCache: { numberOfKeys: 2, file: 'shouldRefreshCache.lua' },
-      releaseCacheRefreshLock: { numberOfKeys: 2, file: 'releaseCacheRefreshLock.lua' },
+  private createBackend(options: AdaptiveCacheOptions, client?: Redis): AdaptiveCacheBackend {
+    if (options.backend && typeof options.backend === 'object') {
+      this.redisClient = client
+      return options.backend
     }
 
-    for (const [name, config] of Object.entries(scripts)) {
-      if (!(this.client as any)[name]) {
-        this.client.defineCommand(name, {
-          numberOfKeys: config.numberOfKeys,
-          lua: fs.readFileSync(path.join(luaPath, config.file), 'utf8'),
-        })
-      }
+    const backendName = options.backend || 'redis'
+
+    if (backendName === 'clustered-lru') {
+      return new ClusteredLruAdaptiveCacheBackend(options.lru, this.logger)
     }
+
+    const ownsClient = !client
+    this.redisClient = client || RedisAdaptiveCacheBackend.createClient(this.logger)
+    const redisBackend = new RedisAdaptiveCacheBackend(this.redisClient, this.logger, ownsClient)
+
+    if (backendName === 'l1-redis') {
+      return new L1RedisAdaptiveCacheBackend(
+        redisBackend,
+        new ClusteredLruAdaptiveCacheBackend(options.lru, this.logger),
+        this.getKeyPrefix(),
+        this.logger,
+      )
+    }
+
+    return redisBackend
+  }
+
+  private getKeyPrefix() {
+    return this.options.keyPrefix || this.options.redisPrefix || 'adaptive:'
   }
 
   public async get(key: string) {
@@ -74,50 +71,49 @@ export class AdaptiveCache {
     const metaKey = key + 'meta'
     const { compress = true, includeDebugHeaders = false } = this.options
 
-    const [cachedData, remainingTTL] = await this.client.adaptiveCacheFetch(dataKey)
+    const result = await this.backend.fetch({
+      key,
+      dataKey,
+      metaKey,
+      redisPrefix: this.getKeyPrefix(),
+      includeDebugHeaders,
+    })
 
-    if (!cachedData) {
+    if (!result) {
       return null
     }
 
-    let result: any = {
-      ttl: remainingTTL,
+    let cacheResult: any = {
+      ttl: result.ttl,
       data: null,
     }
 
     try {
-      const rawData = compress ? zlib.gunzipSync(Buffer.from(cachedData, 'base64')).toString('utf-8') : cachedData
-      result.data = JSON.parse(rawData)
+      const rawData = compress
+        ? zlib.gunzipSync(Buffer.from(result.encodedData, 'base64')).toString('utf-8')
+        : result.encodedData
+      cacheResult.data = JSON.parse(rawData)
     } catch (err) {
       this.logger.warn('adaptiveCache failed to fetch data:', err)
       throw err
     }
 
-    if (includeDebugHeaders) {
-      const metaData = await this.client.hgetall(metaKey)
-      if (Object.keys(metaData).length > 0) {
-        result.metadata = {
-          dataTTL: metaData.dataTTL,
-          lastChanged: metaData.lastChanged,
-          changeCount: metaData.changeCount,
-        }
+    if (includeDebugHeaders && result.metadata) {
+      cacheResult.metadata = {
+        dataTTL: result.metadata.dataTTL,
+        lastChanged: result.metadata.lastChanged,
+        changeCount: result.metadata.changeCount,
       }
     }
 
-    return result
+    return cacheResult
   }
 
   public async set(key: string, data: any, options: { maxTTL?: number; tags?: string[] } = {}) {
     const dataKey = key + 'data'
     const metaKey = key + 'meta'
 
-    const {
-      initialTTL = 5,
-      ttlScaling = 2,
-      metaTTL = 60 * 60 * 24 * 7,
-      compress = true,
-      redisPrefix = 'adaptive:',
-    } = this.options
+    const { initialTTL = 5, ttlScaling = 2, metaTTL = 60 * 60 * 24 * 7, compress = true } = this.options
 
     let maxTTL = options.maxTTL || (typeof this.options.maxTTL === 'number' ? this.options.maxTTL : DEFAULT_MAX_TTL)
 
@@ -131,27 +127,21 @@ export class AdaptiveCache {
     const cacheData = compress ? zlib.gzipSync(Buffer.from(responseData)).toString('base64') : responseData
 
     try {
-      const result = await this.client.adaptiveCacheUpdate(
+      const result = await this.backend.update({
+        key,
         dataKey,
         metaKey,
+        redisPrefix: this.getKeyPrefix(),
+        encodedData: cacheData,
         responseHash,
-        cacheData,
-        initialTTL.toString(),
-        maxTTL.toString(),
-        ttlScaling.toString(),
-        metaTTL.toString(),
-      )
+        initialTTL,
+        maxTTL,
+        ttlScaling,
+        metaTTL,
+        tags: options.tags || [],
+      })
 
-      if (options.tags && options.tags.length > 0) {
-        const pipeline = this.client.pipeline()
-        options.tags.forEach((tag) => {
-          const tagKey = redisPrefix + 'tag:' + tag
-          pipeline.sadd(tagKey, key)
-        })
-        await pipeline.exec()
-      }
-
-      this.logger.debug('redis.adaptiveCache:', metaKey, result)
+      this.logger.debug('adaptiveCache:', this.backend.name, metaKey, result)
       return result
     } catch (err) {
       this.logger.error('Cache operation failed:', err)
@@ -160,29 +150,12 @@ export class AdaptiveCache {
   }
 
   public async invalidateTags(tags: string[]) {
-    const { redisPrefix = 'adaptive:' } = this.options
-
-    for (const tag of tags) {
-      const tagKey = redisPrefix + 'tag:' + tag
-      const keys = await this.client.smembers(tagKey)
-
-      if (keys.length > 0) {
-        const pipeline = this.client.pipeline()
-        keys.forEach((key) => {
-          const dataKey = key + 'data'
-          pipeline.del(dataKey)
-        })
-        pipeline.del(tagKey)
-        await pipeline.exec()
-      } else {
-        await this.client.del(tagKey)
-      }
-    }
+    await this.backend.invalidateTags(tags, this.getKeyPrefix())
   }
 
   public async clear(key: string) {
     const dataKey = key + 'data'
-    await this.client.del(dataKey)
+    await this.backend.clear(key, dataKey)
   }
 
   public async shouldRefresh(
@@ -196,20 +169,16 @@ export class AdaptiveCache {
       typeof lockExpirationSeconds === 'number'
         ? lockExpirationSeconds
         : this.options.lockExpirationSeconds || AdaptiveCache.DEFAULT_LOCK_EXPIRATION_SECONDS
-    const lockExpiration = effectiveLockSeconds * 1000
-
-    const lockKey = lastUpdateKey + '-lock'
     const lockValue = Math.random().toString(36).substring(7)
     this.logger.info('shouldRefreshCache lockValue', lockValue)
 
-    const result = await this.client.shouldRefreshCache(
+    const result = await this.backend.shouldRefresh(
       lastUpdateKey,
-      lockKey,
-      currentTime,
       refreshThreshold,
-      lockExpiration,
+      currentTime,
+      force,
+      effectiveLockSeconds,
       lockValue,
-      force ? 1 : 0,
     )
 
     return result
@@ -217,11 +186,10 @@ export class AdaptiveCache {
 
   public async releaseLock(lastUpdateKey: string, lockValue: string) {
     const currentTime = Math.floor(Date.now() / 1000)
-    const lockKey = lastUpdateKey + '-lock'
-    return this.client.releaseCacheRefreshLock(lastUpdateKey, lockKey, currentTime, lockValue)
+    return this.backend.releaseLock(lastUpdateKey, currentTime, lockValue)
   }
 
   public quit() {
-    return this.client.quit()
+    return this.backend.quit?.()
   }
 }

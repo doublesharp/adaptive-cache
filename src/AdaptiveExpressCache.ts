@@ -6,6 +6,9 @@ import { AdaptiveCacheOptions } from './types'
 
 const DEFAULT_MAX_TTL = 60 * 15 // 15 minutes for adaptive cache
 
+const shouldShareDefaultRedisClient = (options: AdaptiveCacheOptions) =>
+  !options.backend || options.backend === 'redis' || options.backend === 'l1-redis'
+
 // Adaptive caching middleware
 export const adaptiveExpressCache = (
   options: AdaptiveCacheOptions & {
@@ -14,14 +17,19 @@ export const adaptiveExpressCache = (
 ) => {
   const {
     redisPrefix = 'adaptive:', // Default prefix
+    keyPrefix,
     includeHeaders = true, // Default: include headers
     forceRefresh = false, // Default: use cache if available
     tags,
   } = options
+  const cachePrefix = keyPrefix || redisPrefix
 
   let { maxTTL = DEFAULT_MAX_TTL } = options // Default: 15 minutes
 
-  const cacheInstance = new AdaptiveCache(options, getDefaultCache().client)
+  const cacheInstance = new AdaptiveCache(
+    options,
+    shouldShareDefaultRedisClient(options) ? getDefaultCache().client : undefined,
+  )
 
   // If middleware option sets lock expiration, apply it as the module default
   if (typeof options.lockExpirationSeconds === 'number') {
@@ -35,7 +43,7 @@ export const adaptiveExpressCache = (
     const originalSend = res.send
 
     try {
-      const adaptiveCacheKey = getAdaptiveCacheKey(req.originalUrl.split('?')[0], req.query, redisPrefix)
+      const adaptiveCacheKey = getAdaptiveCacheKey(req.originalUrl.split('?')[0], req.query, cachePrefix)
 
       // First check if we have data
       const result = await cacheInstance.get(adaptiveCacheKey)
@@ -114,7 +122,26 @@ export const adaptiveExpressCache = (
 }
 
 // Helper method to manually clear the adaptive cache
-export const clearAdaptiveCache = async (requestPath: string, querystring: any, redisPrefix = 'adaptive:') => {
-  const adaptiveCacheKey = getAdaptiveCacheKey(requestPath, querystring, redisPrefix)
-  await getDefaultCache().clear(adaptiveCacheKey)
+export const clearAdaptiveCache = async (
+  requestPath: string,
+  querystring: any,
+  redisPrefix = 'adaptive:',
+  options: AdaptiveCacheOptions = {},
+) => {
+  const cachePrefix = options.keyPrefix || redisPrefix
+  const adaptiveCacheKey = getAdaptiveCacheKey(requestPath, querystring, cachePrefix)
+  const cache = options.backend
+    ? new AdaptiveCache(
+        { ...options, redisPrefix: cachePrefix },
+        shouldShareDefaultRedisClient(options) ? getDefaultCache().client : undefined,
+      )
+    : getDefaultCache()
+
+  try {
+    await cache.clear(adaptiveCacheKey)
+  } finally {
+    if (options.backend) {
+      await cache.quit()
+    }
+  }
 }

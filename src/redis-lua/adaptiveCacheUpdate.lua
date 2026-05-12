@@ -62,4 +62,4 @@ redis.call('EXPIRE', metaKey, metaTTL)
 redis.call('SET', dataKey, data, 'EX', dataTTL)
 
 -- Return TTL used
-return {'CACHED', dataTTL}
+return {'CACHED', dataTTL, lastChanged, changeCount, hash, isChanged and 1 or 0}

@@ -1,11 +1,11 @@
-import { AdaptiveCacheOptions } from './types'
+import { AdaptiveCacheBackend, AdaptiveCacheBackendName, AdaptiveCacheLruOptions, AdaptiveCacheOptions } from './types'
 import { AdaptiveCache } from './AdaptiveCache'
 import { getDefaultCache, redis } from './singleton'
 import { adaptiveExpressCache, clearAdaptiveCache } from './AdaptiveExpressCache'
 import { adaptiveFastifyCache } from './AdaptiveFastifyCache'
 import { cache } from './utils'
 
-export { AdaptiveCacheOptions, AdaptiveCache }
+export { AdaptiveCacheOptions, AdaptiveCacheBackend, AdaptiveCacheBackendName, AdaptiveCacheLruOptions, AdaptiveCache }
 export { getDefaultCache, redis }
 export { adaptiveExpressCache, clearAdaptiveCache, adaptiveFastifyCache, cache }
 

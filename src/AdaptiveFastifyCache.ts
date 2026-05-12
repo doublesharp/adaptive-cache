@@ -7,14 +7,21 @@ import { AdaptiveCacheOptions } from './types'
 
 const DEFAULT_MAX_TTL = 60 * 15 // 15 minutes
 
+const shouldShareDefaultRedisClient = (options: AdaptiveCacheOptions) =>
+  !options.backend || options.backend === 'redis' || options.backend === 'l1-redis'
+
 export const adaptiveFastifyCache = (
   options: AdaptiveCacheOptions & { tags?: string[] | ((req: FastifyRequest) => string[]) } = {},
 ) => {
-  const { redisPrefix = 'adaptive:', includeHeaders = true, forceRefresh = false, tags } = options
+  const { redisPrefix = 'adaptive:', keyPrefix, includeHeaders = true, forceRefresh = false, tags } = options
+  const cachePrefix = keyPrefix || redisPrefix
 
   let { maxTTL = DEFAULT_MAX_TTL } = options
 
-  const cacheInstance = new AdaptiveCache(options, getDefaultCache().client)
+  const cacheInstance = new AdaptiveCache(
+    options,
+    shouldShareDefaultRedisClient(options) ? getDefaultCache().client : undefined,
+  )
 
   if (typeof options.lockExpirationSeconds === 'number') {
     AdaptiveCache.setDefaultLockExpirationSeconds(options.lockExpirationSeconds)
@@ -26,7 +33,7 @@ export const adaptiveFastifyCache = (
 
       try {
         const urlPath = req.url.split('?')[0]
-        const adaptiveCacheKey = getAdaptiveCacheKey(urlPath, req.query, redisPrefix)
+        const adaptiveCacheKey = getAdaptiveCacheKey(urlPath, req.query, cachePrefix)
 
         const result = await cacheInstance.get(adaptiveCacheKey)
 
@@ -57,7 +64,7 @@ export const adaptiveFastifyCache = (
         if (cacheHeader === 'HIT') return
 
         const urlPath = req.url.split('?')[0]
-        const adaptiveCacheKey = getAdaptiveCacheKey(urlPath, req.query, redisPrefix)
+        const adaptiveCacheKey = getAdaptiveCacheKey(urlPath, req.query, cachePrefix)
 
         let currentMaxTTL = maxTTL
         let body = payload
@@ -66,7 +73,7 @@ export const adaptiveFastifyCache = (
         if (typeof payload === 'string' && typeof maxTTL === 'function') {
           try {
             body = JSON.parse(payload)
-          } catch (e) {
+          } catch {
             // ignore
           }
         }
