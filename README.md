@@ -6,29 +6,47 @@
 [![CI](https://github.com/doublesharp/adaptive-cache/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/doublesharp/adaptive-cache/actions/workflows/ci.yml)
 [![Quality](https://github.com/doublesharp/adaptive-cache/actions/workflows/quality.yml/badge.svg?branch=main)](https://github.com/doublesharp/adaptive-cache/actions/workflows/quality.yml)
 [![Coverage](https://github.com/doublesharp/adaptive-cache/actions/workflows/coverage.yml/badge.svg?branch=main)](https://github.com/doublesharp/adaptive-cache/actions/workflows/coverage.yml)
-[![Test Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen.svg)](https://github.com/doublesharp/adaptive-cache/actions/workflows/coverage.yml)
+[![Test Coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fdoublesharp.github.io%2Fadaptive-cache%2Fcoverage-badge.json)](https://doublesharp.github.io/adaptive-cache/coverage/)
 [![Publish](https://github.com/doublesharp/adaptive-cache/actions/workflows/publish.yml/badge.svg)](https://github.com/doublesharp/adaptive-cache/actions/workflows/publish.yml)
 [![license](https://img.shields.io/github/license/doublesharp/adaptive-cache.svg)](https://github.com/doublesharp/adaptive-cache/blob/main/LICENSE)
 
-Adaptive server-side caching for Redis, Express, Fastify, and Node clusters.
+Server-side response caching for APIs that need fast reads without hand-tuning every TTL.
 
-The default backend keeps Redis as the authoritative cache and adaptive TTL engine. Redis Lua scripts perform the atomic fetch, update, tag, and refresh-lock operations. For lower latency hot reads, the cache can also run with a bounded clustered LRU cache in front of Redis, or as a standalone clustered LRU backend when Redis is not available.
+`@0xdoublesharp/adaptive-cache` caches Express, Fastify, and direct `AdaptiveCache` results. It hashes response bodies, tracks whether content changes, and automatically grows TTLs for stable data while resetting TTLs for volatile data.
 
-The package does not set HTTP `Cache-Control` headers. It caches server responses and adds diagnostic `X-Cache-*` headers unless disabled.
+Redis remains the default authoritative backend through Lua scripts. For lower latency hot reads, add a memory-bounded clustered LRU cache in front of Redis. For single-server or one-host Node cluster deployments, the clustered LRU backend can run without Redis.
 
-## Features
+This package does not set HTTP `Cache-Control` headers. It caches server responses and adds diagnostic `X-Cache-*` headers unless disabled.
 
-- Adaptive TTLs: stable responses live longer; changed responses reset to a short TTL.
-- Redis Lua core: atomic Redis fetch/update/lock behavior remains the default and authoritative path.
-- Bounded L1 cache: optional `@0xdoublesharp/lru-cache-clustered` hot cache for fast reads with memory limits.
-- Async L1 + Redis mode: write L1 immediately, run Redis Lua asynchronously, then reconcile L1 from Redis metadata.
-- Standalone clustered LRU mode: volatile no-Redis backend for single-host or single-primary Node cluster deployments.
-- Content hashing: SHA-256 response hashes detect changes without comparing payload bodies.
-- Compression: gzip + base64 payload storage by default.
-- Tags and explicit clears: invalidate by cache key or tag.
-- Refresh locks: avoid duplicate expensive refreshes.
-- Express and Fastify integrations.
-- Direct `AdaptiveCache` API for non-middleware usage.
+## Use It For
+
+| Need                         | What the module does                                                                 |
+| ---------------------------- | ------------------------------------------------------------------------------------ |
+| API responses that stabilize | Increases TTL when response hashes stay the same.                                    |
+| API responses that change    | Resets TTL when content changes, so volatile data does not stay stale for long.      |
+| Cross-host correctness       | Uses Redis Lua as the atomic authority for payloads, metadata, tags, and locks.      |
+| Lower hot-read latency       | Uses `@0xdoublesharp/lru-cache-clustered` as a bounded L1 cache in front of Redis.   |
+| No-Redis deployments         | Provides a volatile `clustered-lru` backend for single-server or one-host clusters.  |
+| Expensive refreshes          | Provides refresh locks so only one worker performs an expensive rebuild at a time.   |
+| Targeted invalidation        | Clears by computed key or tag, with Redis Pub/Sub invalidation for server-local L1s. |
+| Memory safety                | Sets L1 size budgets and skips entries that are too large for the configured budget. |
+
+## Architecture
+
+![Adaptive Cache architecture](docs/adaptive-cache-architecture.svg)
+
+## Feature Matrix
+
+| Capability                     | `redis` | `l1-redis` | `clustered-lru` |
+| ------------------------------ | :-----: | :--------: | :-------------: |
+| Adaptive TTL growth/reset      |   Yes   |    Yes     |       Yes       |
+| Redis Lua atomic metadata      |   Yes   |    Yes     |       No        |
+| Bounded L1 hot reads           |   No    |    Yes     |       Yes       |
+| Cross-host cache state         |   Yes   |    Yes     |       No        |
+| Tag invalidation               |   Yes   |    Yes     |       Yes       |
+| Refresh locks                  |   Yes   |    Yes     |   Host-local    |
+| Works without Redis            |   No    |     No     |       Yes       |
+| Recommended production default |   Yes   |  Hot APIs  |   Single host   |
 
 ## Installation
 
