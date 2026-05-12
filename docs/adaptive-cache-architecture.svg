@@ -1,9 +1,9 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1040" height="470" viewBox="0 0 1040 470" role="img" aria-labelledby="title desc">
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="620" viewBox="0 0 760 620" role="img" aria-labelledby="title desc">
   <title id="title">Adaptive Cache Architecture</title>
-  <desc id="desc">Express, Fastify, or direct API calls enter Adaptive Cache, which can use Redis Lua, L1 Redis, or clustered LRU backends with adaptive TTL metadata.</desc>
+  <desc id="desc">Express, Fastify, or direct API calls enter Adaptive Cache, which chooses Redis, L1 Redis, or clustered LRU backends.</desc>
   <defs>
-    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-      <path d="M 0 0 L 10 5 L 0 10 z" fill="#8fb6ff"/>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#8fb6ff" />
     </marker>
     <style>
       .bg { fill: #0f172a; }
@@ -14,54 +14,65 @@
       .redis { fill: #7f1d1d; stroke: #fca5a5; stroke-width: 2; }
       .text { fill: #e5edf7; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
       .muted { fill: #b6c3d8; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-      .tiny { font-size: 16px; }
-      .small { font-size: 18px; }
+      .tiny { font-size: 15px; }
+      .small { font-size: 17px; }
       .label { font-size: 22px; font-weight: 700; }
       .title { font-size: 28px; font-weight: 800; }
       .arrow { stroke: #8fb6ff; stroke-width: 3; fill: none; marker-end: url(#arrow); }
     </style>
   </defs>
 
-  <rect class="bg" width="1040" height="470" rx="24"/>
-  <text class="text title" x="40" y="52">Adaptive Cache</text>
-  <text class="muted small" x="40" y="82">Server response cache with adaptive TTLs, Redis Lua authority, and optional bounded L1 hot cache.</text>
+  <rect class="bg" width="760" height="620" rx="24" />
 
-  <rect class="panel" x="40" y="126" width="190" height="110" rx="14"/>
-  <text class="text label" x="70" y="166">Your app</text>
-  <text class="muted tiny" x="70" y="196">Express middleware</text>
-  <text class="muted tiny" x="70" y="218">Fastify plugin</text>
+  <text class="text title" x="36" y="52">Adaptive Cache</text>
+  <text class="muted small" x="36" y="82">Server response caching with adaptive TTLs and optional bounded L1 reads.</text>
 
-  <rect class="accent" x="300" y="112" width="220" height="138" rx="16"/>
-  <text class="text label" x="335" y="152">AdaptiveCache</text>
-  <text class="text tiny" x="335" y="184">hash response body</text>
-  <text class="text tiny" x="335" y="208">grow stable TTLs</text>
-  <text class="text tiny" x="335" y="232">reset changed TTLs</text>
+  <rect class="panel" x="36" y="122" width="190" height="104" rx="14" />
+  <text class="text label" x="66" y="160">Your app</text>
+  <text class="muted tiny" x="66" y="189">Express, Fastify,</text>
+  <text class="muted tiny" x="66" y="211">or direct API</text>
 
-  <path class="arrow" d="M 230 181 L 288 181"/>
+  <path class="arrow" d="M 226 174 L 279 174" />
 
-  <rect class="panel2" x="600" y="106" width="390" height="284" rx="18"/>
-  <text class="text label" x="630" y="146">Backend modes</text>
+  <rect class="accent" x="292" y="108" width="214" height="132" rx="16" />
+  <text class="text label" x="324" y="147">AdaptiveCache</text>
+  <text class="text tiny" x="324" y="177">hash response body</text>
+  <text class="text tiny" x="324" y="199">grow stable TTLs</text>
+  <text class="text tiny" x="324" y="221">reset changed TTLs</text>
 
-  <rect class="redis" x="630" y="172" width="325" height="56" rx="12"/>
-  <text class="text small" x="650" y="196">redis</text>
-  <text class="text tiny" x="650" y="218">Redis Lua is the authoritative cache</text>
+  <path class="arrow" d="M 506 174 L 560 174" />
 
-  <rect class="lru" x="630" y="248" width="325" height="66" rx="12"/>
-  <text class="text small" x="650" y="272">l1-redis</text>
-  <text class="text tiny" x="650" y="294">Clustered LRU serves hot reads</text>
-  <text class="text tiny" x="650" y="312">Redis Lua reconciles metadata</text>
+  <rect class="panel2" x="574" y="108" width="150" height="132" rx="16" />
+  <text class="text label" x="598" y="147">Backend</text>
+  <text class="muted tiny" x="598" y="177">selected per</text>
+  <text class="muted tiny" x="598" y="199">route or cache</text>
+  <text class="muted tiny" x="598" y="221">instance</text>
 
-  <rect class="panel" x="630" y="334" width="325" height="44" rx="12"/>
-  <text class="text small" x="650" y="362">clustered-lru: no Redis, host-local</text>
+  <path class="arrow" d="M 649 240 L 649 286" />
 
-  <path class="arrow" d="M 520 181 C 555 181 560 181 592 181"/>
-  <path class="arrow" d="M 520 181 C 560 181 560 281 622 281"/>
-  <path class="arrow" d="M 520 181 C 570 181 560 356 622 356"/>
+  <rect class="panel2" x="36" y="304" width="688" height="204" rx="18" />
+  <text class="text label" x="66" y="344">Backend modes</text>
 
-  <rect class="panel" x="40" y="306" width="480" height="116" rx="16"/>
-  <text class="text label" x="70" y="346">What gets cached</text>
-  <text class="muted tiny" x="70" y="376">Encoded payload, response hash, adaptive TTL metadata, tags, timestamps.</text>
-  <text class="muted tiny" x="70" y="402">L1 entries are size-bounded and oversized entries are skipped.</text>
+  <rect class="redis" x="66" y="366" width="186" height="112" rx="12" />
+  <text class="text small" x="88" y="398">redis</text>
+  <text class="text tiny" x="88" y="424">Redis Lua stores</text>
+  <text class="text tiny" x="88" y="446">payloads, metadata,</text>
+  <text class="text tiny" x="88" y="468">tags, and locks.</text>
 
-  <path class="arrow" d="M 410 250 L 410 296"/>
+  <rect class="lru" x="286" y="366" width="186" height="112" rx="12" />
+  <text class="text small" x="308" y="398">l1-redis</text>
+  <text class="text tiny" x="308" y="424">Clustered LRU serves</text>
+  <text class="text tiny" x="308" y="446">hot reads; Redis Lua</text>
+  <text class="text tiny" x="308" y="468">stays authoritative.</text>
+
+  <rect class="panel" x="506" y="366" width="186" height="112" rx="12" />
+  <text class="text small" x="528" y="398">clustered-lru</text>
+  <text class="muted tiny" x="528" y="424">No Redis required.</text>
+  <text class="muted tiny" x="528" y="446">Volatile, bounded,</text>
+  <text class="muted tiny" x="528" y="468">host-local cache.</text>
+
+  <rect class="panel" x="36" y="526" width="688" height="58" rx="14" />
+  <text class="text label" x="66" y="563">Cached envelope</text>
+  <text class="muted tiny" x="266" y="550">encoded payload, hash, adaptive TTL metadata, tags, timestamps</text>
+  <text class="muted tiny" x="266" y="572">L1 entries are size-bounded; oversized entries are skipped.</text>
 </svg>
