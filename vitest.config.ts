@@ -10,6 +10,12 @@ export default defineConfig({
       reporter: ['text', 'json', 'html', 'lcov'],
       include: ['src/**/*.ts'],
       exclude: ['src/types.d.ts', 'src/types.ts'], // Exclude types from coverage
+      thresholds: {
+        statements: 100,
+        branches: 100,
+        functions: 100,
+        lines: 100,
+      },
     },
     testTimeout: 30000, // Increase timeout for container startup
     hookTimeout: 30000,

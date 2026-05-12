@@ -2,12 +2,13 @@
 
 [![npm version](https://img.shields.io/npm/v/@0xdoublesharp/adaptive-cache.svg)](https://www.npmjs.com/package/@0xdoublesharp/adaptive-cache)
 [![npm downloads](https://img.shields.io/npm/dm/@0xdoublesharp/adaptive-cache.svg)](https://www.npmjs.com/package/@0xdoublesharp/adaptive-cache)
-[![CI](https://github.com/doublesharp/adaptive-cache/actions/workflows/ci.yml/badge.svg)](https://github.com/doublesharp/adaptive-cache/actions/workflows/ci.yml)
-[![Quality](https://github.com/doublesharp/adaptive-cache/actions/workflows/quality.yml/badge.svg)](https://github.com/doublesharp/adaptive-cache/actions/workflows/quality.yml)
-[![Coverage](https://github.com/doublesharp/adaptive-cache/actions/workflows/coverage.yml/badge.svg)](https://github.com/doublesharp/adaptive-cache/actions/workflows/coverage.yml)
-[![Test Coverage](https://img.shields.io/endpoint?url=https://doublesharp.github.io/adaptive-cache/coverage-badge.json)](https://doublesharp.github.io/adaptive-cache/coverage/)
+[![source version](https://img.shields.io/github/package-json/v/doublesharp/adaptive-cache?label=source)](https://github.com/doublesharp/adaptive-cache/blob/main/package.json)
+[![CI](https://github.com/doublesharp/adaptive-cache/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/doublesharp/adaptive-cache/actions/workflows/ci.yml)
+[![Quality](https://github.com/doublesharp/adaptive-cache/actions/workflows/quality.yml/badge.svg?branch=main)](https://github.com/doublesharp/adaptive-cache/actions/workflows/quality.yml)
+[![Coverage](https://github.com/doublesharp/adaptive-cache/actions/workflows/coverage.yml/badge.svg?branch=main)](https://github.com/doublesharp/adaptive-cache/actions/workflows/coverage.yml)
+[![Test Coverage](https://img.shields.io/badge/coverage-100%25-brightgreen.svg)](https://github.com/doublesharp/adaptive-cache/actions/workflows/coverage.yml)
 [![Publish](https://github.com/doublesharp/adaptive-cache/actions/workflows/publish.yml/badge.svg)](https://github.com/doublesharp/adaptive-cache/actions/workflows/publish.yml)
-[![license](https://img.shields.io/npm/l/@0xdoublesharp/adaptive-cache.svg)](https://github.com/doublesharp/adaptive-cache/blob/main/LICENSE)
+[![license](https://img.shields.io/github/license/doublesharp/adaptive-cache.svg)](https://github.com/doublesharp/adaptive-cache/blob/main/LICENSE)
 
 Adaptive server-side caching for Redis, Express, Fastify, and Node clusters.
 
