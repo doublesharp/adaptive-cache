@@ -1,7 +1,17 @@
 {
   "name": "@0xdoublesharp/adaptive-cache",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "description": "Adaptive caching module for Redis with Fastify and Express integration",
+  "author": "Justin Silver",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/doublesharp/adaptive-cache.git"
+  },
+  "bugs": {
+    "url": "https://github.com/doublesharp/adaptive-cache/issues"
+  },
+  "homepage": "https://github.com/doublesharp/adaptive-cache#readme",
   "keywords": [
     "adaptive",
     "cache",
@@ -23,39 +33,69 @@
       "require": "./dist/index.js"
     }
   },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "packageManager": "pnpm@10.25.0",
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",
-    "lint": "eslint . --ext .ts",
+    "lint": "eslint .",
     "format": "prettier --write .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:coverage": "vitest run --coverage",
+    "test:coverage": "vitest run --coverage test/Backends.test.ts test/ClusteredLruBackend.test.ts test/LruMiddleware.test.ts test/SingletonIndex.test.ts test/utils.test.ts test/Logger.test.ts",
+    "quality": "pnpm run lint && pnpm run typecheck && pnpm run test:coverage && pnpm run build",
+    "bench:configs": "node --expose-gc scripts/benchmark-configs.mjs",
     "clean": "rm -rf dist coverage"
   },
   "dependencies": {
     "debug": "^4.4.3",
-    "ioredis": "^5.8.2"
+    "ioredis": "^5.10.1"
   },
   "devDependencies": {
-    "@types/debug": "^4.1.12",
-    "@types/express": "^5.0.5",
-    "@types/node": "^22.19.0",
-    "@types/supertest": "^6.0.3",
-    "@vitest/coverage-v8": "^4.0.13",
-    "c8": "^10.1.3",
-    "express": "^5.1.0",
-    "fastify": "^5.6.2",
+    "@0xdoublesharp/lru-cache-clustered": "^2.1.0",
+    "@eslint/js": "^10.0.1",
+    "@types/debug": "^4.1.13",
+    "@types/express": "^5.0.6",
+    "@types/node": "^25.7.0",
+    "@types/supertest": "^7.2.0",
+    "@typescript-eslint/eslint-plugin": "^8.59.3",
+    "@typescript-eslint/parser": "^8.59.3",
+    "@vitest/coverage-v8": "^4.1.6",
+    "c8": "^11.0.0",
+    "eslint": "^10.3.0",
+    "eslint-config-prettier": "^10.1.8",
+    "express": "^5.2.1",
+    "fastify": "^5.8.5",
     "fastify-plugin": "^5.1.0",
-    "prettier": "^3.6.2",
-    "supertest": "^7.1.4",
-    "testcontainers": "^11.8.1",
+    "lru-cache": "^11.3.6",
+    "prettier": "^3.8.3",
+    "supertest": "^7.2.2",
+    "testcontainers": "^11.14.0",
     "tsup": "^8.5.1",
-    "typescript": "^5.9.3",
-    "vitest": "^4.0.13"
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.6"
   },
   "peerDependencies": {
-    "express": "^4.18.2",
-    "fastify": "^4.0.0 || ^5.0.0"
+    "@0xdoublesharp/lru-cache-clustered": "^2.1.0",
+    "express": "^5.2.1",
+    "fastify": "^5.8.5",
+    "lru-cache": "^11.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@0xdoublesharp/lru-cache-clustered": {
+      "optional": true
+    },
+    "lru-cache": {
+      "optional": true
+    }
   }
 }
