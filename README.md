@@ -1,13 +1,9 @@
 # @0xdoublesharp/adaptive-cache
 
 [![npm version](https://img.shields.io/npm/v/@0xdoublesharp/adaptive-cache.svg)](https://www.npmjs.com/package/@0xdoublesharp/adaptive-cache)
-[![npm downloads](https://img.shields.io/npm/dm/@0xdoublesharp/adaptive-cache.svg)](https://www.npmjs.com/package/@0xdoublesharp/adaptive-cache)
-[![source version](https://img.shields.io/github/package-json/v/doublesharp/adaptive-cache?label=source)](https://github.com/doublesharp/adaptive-cache/blob/main/package.json)
-[![CI](https://github.com/doublesharp/adaptive-cache/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/doublesharp/adaptive-cache/actions/workflows/ci.yml)
-[![Quality](https://github.com/doublesharp/adaptive-cache/actions/workflows/quality.yml/badge.svg?branch=main)](https://github.com/doublesharp/adaptive-cache/actions/workflows/quality.yml)
-[![Coverage](https://github.com/doublesharp/adaptive-cache/actions/workflows/coverage.yml/badge.svg?branch=main)](https://github.com/doublesharp/adaptive-cache/actions/workflows/coverage.yml)
-[![Test Coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fdoublesharp.github.io%2Fadaptive-cache%2Fcoverage-badge.json)](https://doublesharp.github.io/adaptive-cache/coverage/)
-[![Publish](https://github.com/doublesharp/adaptive-cache/actions/workflows/publish.yml/badge.svg)](https://github.com/doublesharp/adaptive-cache/actions/workflows/publish.yml)
+[![npm downloads](https://img.shields.io/npm/dm/@0xdoublesharp/adaptive-cache.svg)](https://npm-stat.com/charts.html?package=%400xdoublesharp%2Fadaptive-cache)
+[![CI](https://github.com/doublesharp/adaptive-cache/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/doublesharp/adaptive-cache/actions?query=workflow%3ACI+branch%3Amain)
+[![coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fdoublesharp.github.io%2Fadaptive-cache%2Fcoverage-badge.json)](https://doublesharp.github.io/adaptive-cache/coverage/)
 [![license](https://img.shields.io/github/license/doublesharp/adaptive-cache.svg)](https://github.com/doublesharp/adaptive-cache/blob/main/LICENSE)
 
 Server-side response caching for APIs that need fast reads without hand-tuning every TTL.
