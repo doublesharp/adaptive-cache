@@ -170,7 +170,7 @@ export class ClusteredLruAdaptiveCacheBackend implements AdaptiveCacheBackend {
     await this.storeTags(input.redisPrefix, input.key, input.tags, input.metaTTL)
   }
 
-  public async clear(_key: string, dataKey: string) {
+  public async clear(_key: string, dataKey: string, _metaKey: string) {
     const cache = await this.getCache()
     await cache.delete(dataKey)
   }
@@ -251,7 +251,9 @@ export class ClusteredLruAdaptiveCacheBackend implements AdaptiveCacheBackend {
   }
 
   public async quit() {
-    return undefined
+    if (!this.cachePromise) return undefined
+    const cache = await this.cachePromise
+    return cache.destroy?.()
   }
 
   private async getCache() {

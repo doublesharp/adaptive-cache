@@ -93,6 +93,22 @@ describe('AdaptiveCache Class & Utils', () => {
       expect(callCount).toBe(2)
     })
 
+    it('should cache falsy non-null results', async () => {
+      let callCount = 0
+      const falseFn = async () => {
+        callCount++
+        return false
+      }
+
+      const key = 'false-key'
+      const result1 = await cacheModule.cacheResult(key, 10, falseFn)
+      const result2 = await cacheModule.cacheResult(key, 10, falseFn)
+
+      expect(result1).toBe(false)
+      expect(result2).toBe(false)
+      expect(callCount).toBe(1)
+    })
+
     it('should hit cache in cacheResult', async () => {
       const key = 'hit-test'
       await redisClient.set(key, JSON.stringify({ hit: true }))
@@ -206,6 +222,23 @@ describe('AdaptiveCache Class & Utils', () => {
       )
     })
 
+    it('should resolve instance maxTTL functions in direct set calls', async () => {
+      const cache = new cacheModule.AdaptiveCache({ maxTTL: (data) => (data.kind === 'short' ? 12 : undefined) })
+      const spy = vi.spyOn(cache.client, 'adaptiveCacheUpdate')
+      await cache.set('test-key-fn-ttl', { kind: 'short' })
+
+      expect(spy).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.any(String),
+        expect.any(String),
+        expect.any(String),
+        expect.any(String),
+        '12',
+        expect.any(String),
+        expect.any(String),
+      )
+    })
+
     it('should use default maxTTL if neither provided', async () => {
       const cache = new cacheModule.AdaptiveCache({})
       const spy = vi.spyOn(cache.client, 'adaptiveCacheUpdate')
@@ -221,6 +254,23 @@ describe('AdaptiveCache Class & Utils', () => {
         expect.any(String),
         expect.any(String),
       )
+    })
+
+    it('should round-trip strings and buffers without JSON parse failures', async () => {
+      const cache = new cacheModule.AdaptiveCache({ initialTTL: 10 })
+
+      await cache.set('plain-string-key', 'plain text')
+      expect((await cache.get('plain-string-key'))?.data).toBe('plain text')
+
+      await cache.set('buffer-key', Buffer.from('buffer text'))
+      expect(Buffer.isBuffer((await cache.get('buffer-key'))?.data)).toBe(true)
+      expect((await cache.get('buffer-key'))?.data.toString('utf8')).toBe('buffer text')
+
+      await cache.set('empty-buffer-key', Buffer.alloc(0))
+      expect((await cache.get('empty-buffer-key'))?.data.length).toBe(0)
+
+      await cache.set('undefined-key', undefined)
+      expect((await cache.get('undefined-key'))?.data).toBeUndefined()
     })
 
     it('should use instance lockExpirationSeconds if not provided in shouldRefresh', async () => {
@@ -346,9 +396,26 @@ describe('AdaptiveCache Class & Utils', () => {
       cache.quit()
     })
 
-    it('should use TLS options in production', () => {
+    it('should only use TLS options for TLS URLs and verify certificates by default', () => {
       vi.stubEnv('REDIS_URL', 'redis://localhost:6379')
-      vi.stubEnv('NODE_ENV', 'production')
+
+      const cache = new cacheModule.AdaptiveCache()
+      expect(cache.client.options.tls).toBeUndefined()
+
+      vi.unstubAllEnvs()
+      cache.quit()
+
+      vi.stubEnv('REDIS_TLS_URL', 'rediss://localhost:6379')
+      const tlsCache = new cacheModule.AdaptiveCache()
+      expect(tlsCache.client.options.tls).toEqual({ rejectUnauthorized: true })
+
+      vi.unstubAllEnvs()
+      tlsCache.quit()
+    })
+
+    it('should allow explicitly insecure Redis TLS', () => {
+      vi.stubEnv('REDIS_TLS_URL', 'rediss://localhost:6379')
+      vi.stubEnv('REDIS_INSECURE_TLS', 'true')
 
       const cache = new cacheModule.AdaptiveCache()
       expect(cache.client.options.tls).toEqual({ rejectUnauthorized: false })
@@ -549,6 +616,7 @@ describe('AdaptiveCache Class & Utils', () => {
       const members = await redisClient.smembers(tagKey)
       expect(members).toContain(key1)
       expect(members).toContain(key2)
+      expect(await redisClient.ttl(tagKey)).toBeGreaterThan(0)
 
       // Invalidate tag
       await cache.invalidateTags([tag])
@@ -558,6 +626,8 @@ describe('AdaptiveCache Class & Utils', () => {
       const res2After = await cache.get(key2)
       expect(res1After).toBeNull()
       expect(res2After).toBeNull()
+      expect(await redisClient.hgetall(key1 + 'meta')).toEqual({})
+      expect(await redisClient.hgetall(key2 + 'meta')).toEqual({})
 
       // Verify tag set is gone
       const membersAfter = await redisClient.smembers(tagKey)

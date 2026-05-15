@@ -121,7 +121,7 @@ export interface AdaptiveCacheBackend {
   readonly name: AdaptiveCacheBackendName | 'custom'
   fetch(input: AdaptiveCacheBackendFetchInput): Promise<AdaptiveCacheFetchResult | null>
   update(input: AdaptiveCacheBackendUpdateInput): Promise<AdaptiveCacheUpdateResult>
-  clear(key: string, dataKey: string): Promise<void>
+  clear(key: string, dataKey: string, metaKey: string): Promise<void>
   invalidateTags(tags: string[], redisPrefix: string): Promise<string[]>
   shouldRefresh(
     lastUpdateKey: string,
@@ -136,6 +136,7 @@ export interface AdaptiveCacheBackend {
     currentTime: number,
     lockValue: string,
   ): Promise<UpdateCacheAndReleaseLockUPDATED | UpdateCacheAndReleaseLockLOCK_MISMATCH>
+  flush?(): Promise<unknown>
   quit?(): Promise<unknown>
 }
 
@@ -165,6 +166,10 @@ export interface AdaptiveCacheLruOptions {
   localL1?: boolean | AdaptiveCacheLruLocalL1Options
 }
 
+export interface AdaptiveCacheL1RedisOptions {
+  writeMode?: 'async' | 'await-redis'
+}
+
 export interface AdaptiveCacheOptions {
   initialTTL?: number // Initial TTL for data in seconds
   maxTTL?: number | ((data: any) => number | undefined) // Maximum TTL for data in seconds or function that returns TTL
@@ -180,4 +185,6 @@ export interface AdaptiveCacheOptions {
   logLevel?: 'debug' | 'info' | 'warn' | 'error' | 'silent' // Logging level
   backend?: AdaptiveCacheBackendName | AdaptiveCacheBackend
   lru?: AdaptiveCacheLruOptions
+  l1Redis?: AdaptiveCacheL1RedisOptions
+  ignoreQueryParams?: string[] // Query params ignored when computing middleware cache keys
 }

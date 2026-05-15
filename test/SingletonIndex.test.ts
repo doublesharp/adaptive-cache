@@ -90,8 +90,14 @@ describe('singleton and index exports with mocked Redis', () => {
     vi.stubEnv('NODE_ENV', 'production')
     vi.stubEnv('REDIS_TLS_URL', 'rediss://cache.example.test')
     const tlsClient = RedisAdaptiveCacheBackend.createClient(logger) as any
+    expect(tlsClient.options.tls).toEqual({ rejectUnauthorized: true })
     tlsClient.emit('error', new Error('tls client noise'))
     await tlsClient.quit()
+
+    vi.stubEnv('REDIS_TLS_REJECT_UNAUTHORIZED', 'false')
+    const insecureTlsClient = RedisAdaptiveCacheBackend.createClient(logger) as any
+    expect(insecureTlsClient.options.tls).toEqual({ rejectUnauthorized: false })
+    await insecureTlsClient.quit()
 
     vi.unstubAllEnvs()
     vi.stubEnv('REDIS_HOST', 'redis.example.test')

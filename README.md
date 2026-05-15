@@ -46,6 +46,8 @@ This package does not set HTTP `Cache-Control` headers. It caches server respons
 
 ## Installation
 
+Requires Node.js 22 or newer.
+
 Redis-only usage:
 
 ```bash
@@ -56,7 +58,7 @@ Express or Fastify users should also install the framework they use:
 
 ```bash
 pnpm add express
-pnpm add fastify fastify-plugin
+pnpm add fastify
 ```
 
 LRU-backed modes require optional peer dependencies:
@@ -129,6 +131,8 @@ Write path:
 3. Run Redis Lua update asynchronously.
 4. When Redis returns, reconcile L1 with Redis' authoritative adaptive TTL and metadata.
 5. If Redis update fails, keep the short-lived L1 entry and log the failure.
+
+For shutdown-sensitive workers, use `l1Redis.writeMode: 'await-redis'` to wait for Redis before `set()` resolves, or call `cache.flush()` before process shutdown to wait for pending async Redis writes.
 
 Invalidation:
 
@@ -346,7 +350,12 @@ const hit = await cache.get('job:summary')
 if (hit) {
   console.log(hit.data, hit.ttl, hit.metadata)
 }
+
+await cache.flush()
+await cache.quit()
 ```
+
+Payloads are stored in a versioned envelope so direct API calls can round-trip JSON values, strings, buffers, and `undefined`. Middleware caches parsed JSON responses when possible and plain text as strings.
 
 ### Generic Function Caching
 
@@ -411,6 +420,8 @@ await shouldRefreshCache('report:last-update', 60, false, 120)
 | `logLevel`              | `'debug' \| 'info' \| 'warn' \| 'error' \| 'silent'`               | `'info'`      | Logger verbosity.                                                                     |
 | `backend`               | `'redis' \| 'l1-redis' \| 'clustered-lru' \| AdaptiveCacheBackend` | `'redis'`     | Cache backend.                                                                        |
 | `lru`                   | `AdaptiveCacheLruOptions`                                          | unset         | LRU options for `l1-redis` and `clustered-lru`.                                       |
+| `l1Redis.writeMode`     | `'async' \| 'await-redis'`                                         | `'async'`     | Whether `l1-redis` returns after L1 write or waits for Redis reconciliation.          |
+| `ignoreQueryParams`     | `string[]`                                                         | `['refresh']` | Query parameters excluded from middleware cache-key hashes.                           |
 
 ## Headers
 
@@ -471,15 +482,17 @@ dataTTL = max(initialTTL, min(dataTTL + increase, maxTTL))
 
 ## Environment Variables
 
-| Variable        | Description                                                       |
-| --------------- | ----------------------------------------------------------------- |
-| `REDIS_TLS_URL` | Preferred Redis TLS connection string.                            |
-| `REDIS_URL`     | Redis connection string. Used when `REDIS_TLS_URL` is not set.    |
-| `REDIS_HOST`    | Redis host fallback. Defaults to `localhost`.                     |
-| `REDIS_PORT`    | Redis port fallback. Defaults to `6379`.                          |
-| `CACHE_TIME`    | Default duration string for `cache()`, for example `"5 seconds"`. |
+| Variable                        | Description                                                       |
+| ------------------------------- | ----------------------------------------------------------------- |
+| `REDIS_TLS_URL`                 | Preferred Redis TLS connection string.                            |
+| `REDIS_URL`                     | Redis connection string. Used when `REDIS_TLS_URL` is not set.    |
+| `REDIS_HOST`                    | Redis host fallback. Defaults to `localhost`.                     |
+| `REDIS_PORT`                    | Redis port fallback. Defaults to `6379`.                          |
+| `REDIS_TLS_REJECT_UNAUTHORIZED` | Set to `false` to disable Redis TLS certificate verification.     |
+| `REDIS_INSECURE_TLS`            | Set to `true` to disable Redis TLS certificate verification.      |
+| `CACHE_TIME`                    | Default duration string for `cache()`, for example `"5 seconds"`. |
 
-In `NODE_ENV=production`, Redis URL clients are created with TLS options.
+TLS options are applied only for `REDIS_TLS_URL` or `rediss://` URLs. Certificate verification is enabled by default.
 
 ## Custom Backends
 
@@ -496,7 +509,7 @@ const backend: AdaptiveCacheBackend = {
   async update(input) {
     return ['CACHED', input.initialTTL]
   },
-  async clear(key, dataKey) {},
+  async clear(key, dataKey, metaKey) {},
   async invalidateTags(tags, redisPrefix) {
     return []
   },
@@ -506,6 +519,7 @@ const backend: AdaptiveCacheBackend = {
   async releaseLock(lastUpdateKey, currentTime, lockValue) {
     return ['UPDATED']
   },
+  async flush() {},
 }
 ```
 
@@ -516,6 +530,9 @@ const backend: AdaptiveCacheBackend = {
 - L1 entries are intentionally short-lived until Redis Lua returns the authoritative adaptive TTL.
 - Oversized entries are skipped for L1 storage rather than risking unbounded server memory growth.
 - `l1-redis` invalidation uses Redis Pub/Sub, so processes must share the same Redis and prefix to invalidate each other.
+- `?refresh=true` bypasses reads but is ignored when computing the cache key, so refresh requests update the normal key.
+- Explicit `clear(key)` removes the data and metadata keys. Existing tag sets may contain stale members until their `metaTTL` expires.
+- Call `cache.flush()` before shutdown if you use default async `l1-redis` writes and need to wait for pending Redis reconciliation.
 - `redisPrefix` still works; prefer `keyPrefix` for new code when you want a backend-neutral name.
 
 ## Development
@@ -533,7 +550,7 @@ pnpm run bench:configs
 
 `pnpm run test` runs the full suite, including Redis/Testcontainers integration tests.
 
-`pnpm run test:coverage` runs the deterministic source coverage suite and currently verifies:
+`pnpm run test:coverage` runs the full suite, including Redis/Testcontainers integration tests, and currently verifies:
 
 ```text
 Statements : 100%

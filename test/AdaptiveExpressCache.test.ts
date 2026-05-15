@@ -163,17 +163,22 @@ describe('Adaptive Express Cache', () => {
       const res3 = await request(app).get('/refresh?refresh=true')
       expect(res3.headers['x-cache']).toBe('BYPASS')
       expect(callCount).toBe(2)
+
+      const res4 = await request(app).get('/refresh')
+      expect(res4.headers['x-cache']).toBe('HIT')
+      expect(res4.body).toEqual({ count: 2 })
+      expect(callCount).toBe(2)
     })
 
     it('should handle maxTTL as a function', async () => {
       const app = express()
+      const maxTTL = vi.fn((body) => body.ttl)
+      const updateSpy = vi.spyOn(cacheModule.getDefaultCache().client, 'adaptiveCacheUpdate')
+
       app.get(
         '/maxttl',
         cacheModule.adaptiveExpressCache({
-          maxTTL: (body) => {
-            const data = typeof body === 'string' ? JSON.parse(body) : body
-            return data.ttl
-          },
+          maxTTL,
         }),
         (req, res) => {
           res.json({ ttl: 20 })
@@ -182,6 +187,53 @@ describe('Adaptive Express Cache', () => {
 
       await request(app).get('/maxttl')
       await new Promise((r) => setTimeout(r, 100))
+
+      expect(maxTTL).toHaveBeenCalledWith({ ttl: 20 })
+      expect(updateSpy).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.any(String),
+        expect.any(String),
+        expect.any(String),
+        expect.any(String),
+        '20',
+        expect.any(String),
+        expect.any(String),
+      )
+    })
+
+    it('should serve cached falsy responses as hits', async () => {
+      const app = express()
+      let callCount = 0
+
+      app.get('/false-response', cacheModule.adaptiveExpressCache({ initialTTL: 10 }), (req, res) => {
+        callCount++
+        res.json(false)
+      })
+
+      await request(app).get('/false-response').expect(200)
+      await new Promise((r) => setTimeout(r, 100))
+
+      const res2 = await request(app).get('/false-response').expect(200)
+      expect(res2.headers['x-cache']).toBe('HIT')
+      expect(res2.body).toBe(false)
+      expect(callCount).toBe(1)
+    })
+
+    it('should cache plain text responses', async () => {
+      const app = express()
+      let callCount = 0
+
+      app.get('/plain-text', cacheModule.adaptiveExpressCache({ initialTTL: 10 }), (_req, res) => {
+        callCount++
+        res.type('text/plain').send('plain text')
+      })
+
+      await request(app).get('/plain-text').expect(200, 'plain text')
+      await new Promise((r) => setTimeout(r, 100))
+
+      const res2 = await request(app).get('/plain-text').expect(200, 'plain text')
+      expect(res2.headers['x-cache']).toBe('HIT')
+      expect(callCount).toBe(1)
     })
 
     it('should compress data by default', async () => {
@@ -261,8 +313,6 @@ describe('Adaptive Express Cache', () => {
 
       // Should still return 200
       await request(app).get('/update-fail').expect(200)
-      // We can't easily check if it logged error, but coverage should be hit
-      // Wait for async update
       await new Promise((r) => setTimeout(r, 100))
 
       expect(errorSpy).toHaveBeenCalledWith('Cache update failed:', expect.any(Error))

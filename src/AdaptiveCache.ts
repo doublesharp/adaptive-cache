@@ -8,6 +8,68 @@ import { RedisAdaptiveCacheBackend } from './backends/RedisAdaptiveCacheBackend'
 import { AdaptiveCacheBackend, AdaptiveCacheOptions } from './types'
 
 const DEFAULT_MAX_TTL = 60 * 15 // 15 minutes
+const PAYLOAD_ENVELOPE_VERSION = 1
+
+interface PayloadEnvelope {
+  __adaptiveCachePayload: typeof PAYLOAD_ENVELOPE_VERSION
+  type: 'json' | 'string' | 'buffer' | 'undefined'
+  value?: any
+}
+
+const isPayloadEnvelope = (value: any): value is PayloadEnvelope =>
+  value && typeof value === 'object' && value.__adaptiveCachePayload === PAYLOAD_ENVELOPE_VERSION
+
+const encodePayload = (data: any) => {
+  let envelope: PayloadEnvelope
+
+  if (Buffer.isBuffer(data)) {
+    envelope = {
+      __adaptiveCachePayload: PAYLOAD_ENVELOPE_VERSION,
+      type: 'buffer',
+      value: data.toString('base64'),
+    }
+  } else if (typeof data === 'string') {
+    envelope = {
+      __adaptiveCachePayload: PAYLOAD_ENVELOPE_VERSION,
+      type: 'string',
+      value: data,
+    }
+  } else if (typeof data === 'undefined') {
+    envelope = {
+      __adaptiveCachePayload: PAYLOAD_ENVELOPE_VERSION,
+      type: 'undefined',
+    }
+  } else {
+    envelope = {
+      __adaptiveCachePayload: PAYLOAD_ENVELOPE_VERSION,
+      type: 'json',
+      value: data,
+    }
+  }
+
+  return JSON.stringify(envelope)
+}
+
+const decodePayload = (rawData: string) => {
+  let parsed: any
+  try {
+    parsed = JSON.parse(rawData)
+  } catch {
+    return rawData
+  }
+
+  if (!isPayloadEnvelope(parsed)) return parsed
+
+  if (parsed.type === 'buffer') {
+    return Buffer.from(String(parsed.value || ''), 'base64')
+  }
+
+  if (parsed.type === 'undefined') {
+    return undefined
+  }
+
+  return parsed.value
+}
 
 export class AdaptiveCache {
   public static DEFAULT_LOCK_EXPIRATION_SECONDS = 60
@@ -56,6 +118,7 @@ export class AdaptiveCache {
         new ClusteredLruAdaptiveCacheBackend(options.lru, this.logger),
         this.getKeyPrefix(),
         this.logger,
+        options.l1Redis?.writeMode,
       )
     }
 
@@ -92,7 +155,7 @@ export class AdaptiveCache {
       const rawData = compress
         ? zlib.gunzipSync(Buffer.from(result.encodedData, 'base64')).toString('utf-8')
         : result.encodedData
-      cacheResult.data = JSON.parse(rawData)
+      cacheResult.data = decodePayload(rawData)
     } catch (err) {
       this.logger.warn('adaptiveCache failed to fetch data:', err)
       throw err
@@ -115,13 +178,20 @@ export class AdaptiveCache {
 
     const { initialTTL = 5, ttlScaling = 2, metaTTL = 60 * 60 * 24 * 7, compress = true } = this.options
 
-    let maxTTL = options.maxTTL || (typeof this.options.maxTTL === 'number' ? this.options.maxTTL : DEFAULT_MAX_TTL)
+    let maxTTL = DEFAULT_MAX_TTL
+    if (typeof options.maxTTL === 'number') {
+      maxTTL = options.maxTTL
+    } else if (typeof this.options.maxTTL === 'number') {
+      maxTTL = this.options.maxTTL
+    } else if (typeof this.options.maxTTL === 'function') {
+      const calculatedTTL = this.options.maxTTL(data)
+      maxTTL =
+        typeof calculatedTTL === 'number' && Number.isFinite(calculatedTTL) && calculatedTTL > 0
+          ? calculatedTTL
+          : DEFAULT_MAX_TTL
+    }
 
-    // If global maxTTL is a function, the caller should have resolved it,
-    // or we can't resolve it here without the data context if it wasn't passed.
-    // For standalone set, we assume maxTTL is resolved or we use default.
-
-    const responseData = typeof data === 'string' ? data : JSON.stringify(data)
+    const responseData = encodePayload(data)
     const responseHash = crypto.createHash('sha256').update(responseData).digest('hex')
 
     const cacheData = compress ? zlib.gzipSync(Buffer.from(responseData)).toString('base64') : responseData
@@ -155,7 +225,8 @@ export class AdaptiveCache {
 
   public async clear(key: string) {
     const dataKey = key + 'data'
-    await this.backend.clear(key, dataKey)
+    const metaKey = key + 'meta'
+    await this.backend.clear(key, dataKey, metaKey)
   }
 
   public async shouldRefresh(
@@ -191,5 +262,9 @@ export class AdaptiveCache {
 
   public quit() {
     return this.backend.quit?.()
+  }
+
+  public flush() {
+    return this.backend.flush?.()
   }
 }

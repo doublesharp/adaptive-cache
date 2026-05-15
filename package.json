@@ -1,6 +1,6 @@
 {
   "name": "@0xdoublesharp/adaptive-cache",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "description": "Adaptive caching module for Redis with Fastify and Express integration",
   "author": "Justin Silver",
   "license": "MIT",
@@ -45,6 +45,9 @@
     "LICENSE"
   ],
   "packageManager": "pnpm@10.25.0",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",
@@ -52,7 +55,7 @@
     "format": "prettier --write .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:coverage": "vitest run --coverage test/Backends.test.ts test/ClusteredLruBackend.test.ts test/LruMiddleware.test.ts test/SingletonIndex.test.ts test/utils.test.ts test/Logger.test.ts",
+    "test:coverage": "vitest run --coverage",
     "quality": "pnpm run lint && pnpm run typecheck && pnpm run test:coverage && pnpm run build",
     "bench:configs": "node --expose-gc scripts/benchmark-configs.mjs",
     "clean": "rm -rf dist coverage"
@@ -76,7 +79,6 @@
     "eslint-config-prettier": "^10.1.8",
     "express": "^5.2.1",
     "fastify": "^5.8.5",
-    "fastify-plugin": "^5.1.0",
     "lru-cache": "^11.3.6",
     "prettier": "^3.8.3",
     "supertest": "^7.2.2",
@@ -87,12 +89,18 @@
   },
   "peerDependencies": {
     "@0xdoublesharp/lru-cache-clustered": "^2.1.0",
-    "express": "^5.2.1",
-    "fastify": "^5.8.5",
+    "express": "^4.18.2 || ^5.0.0",
+    "fastify": "^4.0.0 || ^5.0.0",
     "lru-cache": "^11.0.0"
   },
   "peerDependenciesMeta": {
     "@0xdoublesharp/lru-cache-clustered": {
+      "optional": true
+    },
+    "express": {
+      "optional": true
+    },
+    "fastify": {
       "optional": true
     },
     "lru-cache": {

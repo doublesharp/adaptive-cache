@@ -1,5 +1,3 @@
-import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify'
-import fp from 'fastify-plugin'
 import { AdaptiveCache } from './AdaptiveCache'
 import { getDefaultCache } from './singleton'
 import { getAdaptiveCacheKey } from './utils'
@@ -7,13 +5,45 @@ import { AdaptiveCacheOptions } from './types'
 
 const DEFAULT_MAX_TTL = 60 * 15 // 15 minutes
 
+type FastifyRequestLike = {
+  url: string
+  query: any
+}
+
+type FastifyReplyLike = {
+  statusCode: number
+  header: (name: string, value: any) => any
+  getHeader: (name: string) => unknown
+  send: (payload?: any) => any
+}
+
+type FastifyInstanceLike = {
+  addHook: (name: 'onRequest' | 'onSend', handler: (...args: any[]) => unknown) => unknown
+}
+
 const shouldShareDefaultRedisClient = (options: AdaptiveCacheOptions) =>
   !options.backend || options.backend === 'redis' || options.backend === 'l1-redis'
 
+const asFastifyPlugin = (plugin: (instance: FastifyInstanceLike) => Promise<void>) =>
+  Object.assign(plugin, {
+    [Symbol.for('skip-override')]: true,
+    [Symbol.for('fastify.display-name')]: 'adaptive-fastify-cache',
+    [Symbol.for('plugin-meta')]: {
+      name: 'adaptive-fastify-cache',
+    },
+  })
+
 export const adaptiveFastifyCache = (
-  options: AdaptiveCacheOptions & { tags?: string[] | ((req: FastifyRequest) => string[]) } = {},
+  options: AdaptiveCacheOptions & { tags?: string[] | ((req: FastifyRequestLike) => string[]) } = {},
 ) => {
-  const { redisPrefix = 'adaptive:', keyPrefix, includeHeaders = true, forceRefresh = false, tags } = options
+  const {
+    redisPrefix = 'adaptive:',
+    keyPrefix,
+    includeHeaders = true,
+    forceRefresh = false,
+    tags,
+    ignoreQueryParams,
+  } = options
   const cachePrefix = keyPrefix || redisPrefix
 
   let { maxTTL = DEFAULT_MAX_TTL } = options
@@ -27,17 +57,17 @@ export const adaptiveFastifyCache = (
     AdaptiveCache.setDefaultLockExpirationSeconds(options.lockExpirationSeconds)
   }
 
-  const plugin = async (instance: FastifyInstance) => {
-    instance.addHook('onRequest', async (req: FastifyRequest, reply: FastifyReply) => {
+  const plugin = async (instance: FastifyInstanceLike) => {
+    instance.addHook('onRequest', async (req: FastifyRequestLike, reply: FastifyReplyLike) => {
       const overrideCache = (req.query as any).refresh === 'true' || forceRefresh
 
       try {
         const urlPath = req.url.split('?')[0]
-        const adaptiveCacheKey = getAdaptiveCacheKey(urlPath, req.query, cachePrefix)
+        const adaptiveCacheKey = getAdaptiveCacheKey(urlPath, req.query, cachePrefix, ignoreQueryParams)
 
         const result = await cacheInstance.get(adaptiveCacheKey)
 
-        if (result && result.data && !overrideCache) {
+        if (result && !overrideCache) {
           if (includeHeaders) {
             reply.header('X-Cache', 'HIT')
             reply.header('X-Cache-TTL', result.ttl.toString())
@@ -58,13 +88,13 @@ export const adaptiveFastifyCache = (
       }
     })
 
-    instance.addHook('onSend', async (req: FastifyRequest, reply: FastifyReply, payload: any) => {
+    instance.addHook('onSend', async (req: FastifyRequestLike, reply: FastifyReplyLike, payload: any) => {
       if (reply.statusCode >= 200 && reply.statusCode < 300) {
         const cacheHeader = reply.getHeader('X-Cache')
         if (cacheHeader === 'HIT') return
 
         const urlPath = req.url.split('?')[0]
-        const adaptiveCacheKey = getAdaptiveCacheKey(urlPath, req.query, cachePrefix)
+        const adaptiveCacheKey = getAdaptiveCacheKey(urlPath, req.query, cachePrefix, ignoreQueryParams)
 
         let currentMaxTTL = maxTTL
         let body = payload
@@ -80,7 +110,7 @@ export const adaptiveFastifyCache = (
 
         if (typeof maxTTL === 'function') {
           const calculatedTTL = maxTTL(body)
-          if (calculatedTTL) {
+          if (typeof calculatedTTL === 'number' && Number.isFinite(calculatedTTL) && calculatedTTL > 0) {
             currentMaxTTL = calculatedTTL
           } else {
             currentMaxTTL = DEFAULT_MAX_TTL
@@ -98,7 +128,7 @@ export const adaptiveFastifyCache = (
             }
           }
 
-          await cacheInstance.set(adaptiveCacheKey, payload, {
+          await cacheInstance.set(adaptiveCacheKey, body, {
             maxTTL: currentMaxTTL as number,
             tags: requestTags,
           })
@@ -111,7 +141,5 @@ export const adaptiveFastifyCache = (
     })
   }
 
-  return fp(plugin, {
-    name: 'adaptive-fastify-cache',
-  })
+  return asFastifyPlugin(plugin)
 }

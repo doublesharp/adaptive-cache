@@ -36,6 +36,12 @@ const metadataFromTuple = (
   return Object.keys(metadata).length > 0 ? metadata : undefined
 }
 
+const shouldUseTls = (redisURL: string | undefined) =>
+  Boolean(process.env.REDIS_TLS_URL) || Boolean(redisURL?.startsWith('rediss://'))
+
+const shouldRejectUnauthorizedTls = () =>
+  process.env.REDIS_TLS_REJECT_UNAUTHORIZED !== 'false' && process.env.REDIS_INSECURE_TLS !== 'true'
+
 export class RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
   public readonly name = 'redis' as const
   public readonly client: Redis
@@ -51,7 +57,7 @@ export class RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
 
   public static createClient(logger: Logger) {
     const redisURL = process.env.REDIS_TLS_URL || process.env.REDIS_URL
-    const redisParams = process.env.NODE_ENV === 'production' ? { tls: { rejectUnauthorized: false } } : {}
+    const redisParams = shouldUseTls(redisURL) ? { tls: { rejectUnauthorized: shouldRejectUnauthorizedTls() } } : {}
 
     const client = redisURL
       ? new Redis(redisURL, redisParams)
@@ -135,6 +141,7 @@ export class RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
       input.tags.forEach((tag) => {
         const tagKey = input.redisPrefix + 'tag:' + tag
         pipeline.sadd(tagKey, input.key)
+        pipeline.expire(tagKey, input.metaTTL)
       })
       await pipeline.exec()
     }
@@ -142,8 +149,8 @@ export class RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
     return result
   }
 
-  public async clear(_key: string, dataKey: string) {
-    await this.client.del(dataKey)
+  public async clear(_key: string, dataKey: string, metaKey: string) {
+    await this.client.del(dataKey, metaKey)
   }
 
   public async invalidateTags(tags: string[], redisPrefix: string) {
@@ -157,7 +164,7 @@ export class RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
       if (keys.length > 0) {
         const pipeline = this.client.pipeline()
         keys.forEach((key) => {
-          pipeline.del(key + 'data')
+          pipeline.del(key + 'data', key + 'meta')
         })
         pipeline.del(tagKey)
         await pipeline.exec()

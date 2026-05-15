@@ -84,7 +84,7 @@ describe('Express clustered LRU middleware', () => {
     const dynamic = adaptiveExpressCache({
       ...options,
       includeHeaders: false,
-      maxTTL: (body) => (typeof body === 'string' && body.includes('stable') ? 20 : undefined),
+      maxTTL: (body) => (body && body.value === 'stable' ? 20 : undefined),
       tags: (req) => [`query:${req.query.id}`],
     })
     const error = adaptiveExpressCache(options)
@@ -123,6 +123,24 @@ describe('Express clustered LRU middleware', () => {
     const stringSecond = await callExpress(stringResponse, stringHandler, '/string')
     expect(stringSecond.headers['x-cache']).toBe('HIT')
     expect(stringSecond.body).toBe('stable')
+  })
+
+  it('should leave invalid JSON strings as strings for dynamic maxTTL', async () => {
+    const middleware = adaptiveExpressCache({
+      ...lruOptions('express-invalid-json-ttl'),
+      maxTTL: (body) => (typeof body === 'string' && body.includes('plain') ? 20 : undefined),
+    })
+    const fallback = adaptiveExpressCache({
+      ...lruOptions('express-default-json-ttl'),
+      maxTTL: () => undefined,
+    })
+
+    const response = await callExpress(middleware, (_req, res) => res.send('plain text'), '/plain-text')
+    const fallbackResponse = await callExpress(fallback, (_req, res) => res.send('plain text'), '/plain-default')
+
+    expect(response.headers['x-cache']).toBe('MISS')
+    expect(response.body).toBe('plain text')
+    expect(fallbackResponse.headers['x-cache']).toBe('MISS')
   })
 
   it('should continue on backend fetch failures and retry when cached response send fails', async () => {

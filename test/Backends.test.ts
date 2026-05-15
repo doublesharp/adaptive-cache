@@ -63,6 +63,8 @@ describe('RedisAdaptiveCacheBackend', () => {
 
     const invalidated = await backend.invalidateTags(['tag-a'], 'adaptive:')
     expect(invalidated).toEqual(['redis-key'])
+    expect(await redis.hgetall('redis-keymeta')).toEqual({})
+    expect(await redis.exists('adaptive:tag:tag-a')).toBe(0)
     expect(await backend.invalidateTags(['missing-tag'], 'adaptive:')).toEqual([])
     expect(
       await backend.fetch({
@@ -74,7 +76,19 @@ describe('RedisAdaptiveCacheBackend', () => {
       }),
     ).toBeNull()
 
-    await backend.clear('redis-key', 'redis-keydata')
+    await redis.adaptiveCacheUpdate(
+      'redis-keydata',
+      'redis-keymeta',
+      'hash-b',
+      JSON.stringify({ ok: false }),
+      '5',
+      '60',
+      '2',
+      '100',
+    )
+    await backend.clear('redis-key', 'redis-keydata', 'redis-keymeta')
+    expect(await redis.get('redis-keydata')).toBeNull()
+    expect(await redis.hgetall('redis-keymeta')).toEqual({})
     await backend.quit()
     expect(redis.quitCalls).toBe(0)
   })
@@ -164,12 +178,14 @@ describe('ClusteredLruAdaptiveCacheBackend edge cases', () => {
   it('should use safe defaults and pass through v2.1 local L1 options', async () => {
     const originalLoader = ClusteredLruAdaptiveCacheBackend.loadModule
     const constructorOptions: any[] = []
+    const instances: any[] = []
 
     class FakeClusteredCache {
       static bootstrap = vi.fn()
 
       constructor(options: any) {
         constructorOptions.push(options)
+        instances.push(this)
       }
 
       async healthCheck() {
@@ -185,6 +201,10 @@ describe('ClusteredLruAdaptiveCacheBackend edge cases', () => {
       }
 
       async delete() {
+        return true
+      }
+
+      async destroy() {
         return true
       }
     }
@@ -222,6 +242,9 @@ describe('ClusteredLruAdaptiveCacheBackend edge cases', () => {
       localL1,
     })
     expect(FakeClusteredCache.bootstrap).toHaveBeenCalled()
+
+    await defaultBackend.quit()
+    expect(instances[0].destroy).toBeDefined()
 
     ClusteredLruAdaptiveCacheBackend.loadModule = originalLoader
   })
@@ -301,6 +324,12 @@ describe('ClusteredLruAdaptiveCacheBackend edge cases', () => {
     await backend.hydrateFromUpdate(updateInput, ['CACHED', false, false, false, false] as any)
     expect((await backend.fetch(fetchInput))?.metadata?.hash).toBe('fallback-hash')
     expect(await backend.invalidateTags(['missing-tag'], 'adaptive:')).toEqual([])
+  })
+
+  it('should no-op quit before clustered LRU initialization', async () => {
+    const backend = new ClusteredLruAdaptiveCacheBackend({ namespace: namespace('quit-before-init') }, logger())
+
+    await expect(backend.quit()).resolves.toBeUndefined()
   })
 
   it('should throw a useful error when the optional LRU package cannot be loaded or has no export', async () => {
@@ -386,7 +415,7 @@ describe('L1RedisAdaptiveCacheBackend', () => {
     expect(await backend.invalidateTags(['l1-tag'], 'adaptive:')).toEqual(['l1-key'])
     expect(redis.published.length).toBeGreaterThan(0)
 
-    await backend.clear('l1-key', 'l1-keydata')
+    await backend.clear('l1-key', 'l1-keydata', 'l1-keymeta')
     await backend.quit()
   })
 
@@ -426,6 +455,63 @@ describe('L1RedisAdaptiveCacheBackend', () => {
     await backend.quit()
   })
 
+  it('should support awaiting Redis writes and flushing async writes', async () => {
+    const redis = new FakeRedis()
+    const redisBackend = new RedisAdaptiveCacheBackend(redis as any, logger())
+    const lru = new ClusteredLruAdaptiveCacheBackend(
+      { namespace: namespace('l1-await'), maxSizeBytes: 1024 * 1024 },
+      logger(),
+    )
+    const awaitBackend = new L1RedisAdaptiveCacheBackend(redisBackend, lru, 'adaptive:', logger(), 'await-redis')
+    const input = {
+      key: 'await-key',
+      dataKey: 'await-keydata',
+      metaKey: 'await-keymeta',
+      redisPrefix: 'adaptive:',
+      encodedData: JSON.stringify({ ok: true }),
+      responseHash: 'await-hash',
+      initialTTL: 3,
+      maxTTL: 60,
+      ttlScaling: 2,
+      metaTTL: 100,
+      tags: [],
+    }
+
+    expect((await awaitBackend.update(input))[4]).toBe('await-hash')
+    expect((await redis.hgetall('await-keymeta')).hash).toBe('await-hash')
+    await awaitBackend.flush()
+    await awaitBackend.quit()
+  })
+
+  it('should reject awaited Redis writes when Redis update fails', async () => {
+    const redis = new FakeRedis()
+    redis.failUpdate = true
+    const redisBackend = new RedisAdaptiveCacheBackend(redis as any, logger())
+    const lru = new ClusteredLruAdaptiveCacheBackend(
+      { namespace: namespace('l1-await-fail'), maxSizeBytes: 1024 * 1024 },
+      logger(),
+    )
+    const backend = new L1RedisAdaptiveCacheBackend(redisBackend, lru, 'adaptive:', logger(), 'await-redis')
+
+    await expect(
+      backend.update({
+        key: 'await-fail-key',
+        dataKey: 'await-fail-keydata',
+        metaKey: 'await-fail-keymeta',
+        redisPrefix: 'adaptive:',
+        encodedData: JSON.stringify({ ok: true }),
+        responseHash: 'await-fail-hash',
+        initialTTL: 3,
+        maxTTL: 60,
+        ttlScaling: 2,
+        metaTTL: 100,
+        tags: [],
+      }),
+    ).rejects.toThrow('update failed')
+
+    await backend.quit()
+  })
+
   it('should tolerate subscriber and publish failures', async () => {
     const redis = new FakeRedis()
     redis.failSubscribe = true
@@ -438,7 +524,7 @@ describe('L1RedisAdaptiveCacheBackend', () => {
     const backend = new L1RedisAdaptiveCacheBackend(redisBackend, lru, 'adaptive:', logger())
 
     await (backend as any).publishInvalidation([])
-    await backend.clear('key', 'keydata')
+    await backend.clear('key', 'keydata', 'keymeta')
     await vi.waitFor(() => expect((backend as any).subscriber.subscribedChannels).toEqual([]))
     await backend.quit()
 
@@ -610,6 +696,7 @@ describe('AdaptiveCache backend integration', () => {
       invalidateTags: vi.fn(async () => []),
       shouldRefresh: vi.fn(async () => ['UPDATE', 'lock'] as any),
       releaseLock: vi.fn(async () => ['UPDATED'] as any),
+      flush: vi.fn(async () => undefined),
       quit: vi.fn(async () => undefined),
     }
     const cache = new AdaptiveCache({ backend })
@@ -621,10 +708,22 @@ describe('AdaptiveCache backend integration', () => {
     expect((await cache.shouldRefresh('refresh', 1))[0]).toBe('UPDATE')
     expect((await cache.shouldRefresh('refresh-explicit', 1, false, 5))[0]).toBe('UPDATE')
     expect(await cache.releaseLock('refresh', 'lock')).toEqual(['UPDATED'])
+    await cache.flush()
     await cache.quit()
 
     expect(() => cache.client).toThrow('not using a Redis-backed backend')
     expect(backend.update).toHaveBeenCalled()
+    expect(backend.flush).toHaveBeenCalled()
+
+    const ttlBackend = {
+      ...backend,
+      update: vi.fn(async () => ['CACHED', 1] as any),
+    }
+    const ttlCache = new AdaptiveCache({ backend: ttlBackend, maxTTL: (data) => (data.ok ? 42 : undefined) })
+    await ttlCache.set('custom-ttl-key', { ok: true })
+    await ttlCache.set('custom-default-ttl-key', { ok: false })
+    expect(ttlBackend.update).toHaveBeenCalledWith(expect.objectContaining({ maxTTL: 42 }))
+    expect(ttlBackend.update).toHaveBeenCalledWith(expect.objectContaining({ maxTTL: 900 }))
   })
 
   it('should surface backend fetch decode errors and update errors', async () => {
@@ -639,7 +738,7 @@ describe('AdaptiveCache backend integration', () => {
     }
     const badFetchCache = new AdaptiveCache({ backend: badFetchBackend, compress: false })
 
-    await expect(badFetchCache.get('bad-json')).rejects.toThrow()
+    await expect(badFetchCache.get('bad-json')).resolves.toEqual({ ttl: 1, data: 'not-json' })
 
     const badUpdateBackend = {
       ...badFetchBackend,

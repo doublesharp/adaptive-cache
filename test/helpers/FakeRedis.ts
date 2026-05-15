@@ -1,3 +1,5 @@
+import { URL } from 'node:url'
+
 type PipelineCommand = () => void
 
 interface StoredValue {
@@ -26,9 +28,21 @@ export class FakeRedis {
   public defineCommandCalls: string[] = []
   public quitCalls = 0
 
-  constructor(stores?: FakeRedis['stores'] | Record<string, unknown>) {
+  constructor(stores?: FakeRedis['stores'] | Record<string, unknown> | string, options?: Record<string, unknown>) {
+    if (typeof stores === 'string') {
+      const url = new URL(stores)
+      this.options = {
+        host: url.hostname,
+        port: url.port ? Number(url.port) : 6379,
+        ...(options || {}),
+      } as typeof this.options
+      return
+    }
+
     if (stores && stores.values instanceof Map && stores.hashes instanceof Map && stores.sets instanceof Map) {
       this.stores = stores as FakeRedis['stores']
+    } else if (stores) {
+      this.options = { ...this.options, ...stores }
     }
   }
 
@@ -126,6 +140,13 @@ export class FakeRedis {
           const set = this.stores.sets.get(key) || new Set<string>()
           set.add(value)
           this.stores.sets.set(key, set)
+        })
+        return this
+      },
+      expire: (key: string, ttl: number) => {
+        commands.push(() => {
+          const value = this.stores.values.get(key)
+          if (value) value.expiresAt = Date.now() + ttl * 1000
         })
         return this
       },

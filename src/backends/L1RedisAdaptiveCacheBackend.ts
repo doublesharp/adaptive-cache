@@ -20,6 +20,8 @@ export class L1RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
   private readonly redis: RedisAdaptiveCacheBackend
   private readonly lru: ClusteredLruAdaptiveCacheBackend
   private readonly logger: Logger
+  private readonly writeMode: 'async' | 'await-redis'
+  private readonly pendingUpdates = new Set<Promise<void>>()
   private readonly sourceId = Math.random().toString(36).slice(2)
   private readonly channel: string
   private subscriber?: Redis
@@ -30,11 +32,13 @@ export class L1RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
     lru: ClusteredLruAdaptiveCacheBackend,
     redisPrefix: string,
     logger: Logger,
+    writeMode: 'async' | 'await-redis' = 'async',
   ) {
     this.redis = redis
     this.client = redis.client
     this.lru = lru
     this.logger = logger
+    this.writeMode = writeMode
     this.channel = redisPrefix + 'l1:invalidate'
     this.subscribeInvalidations()
   }
@@ -59,25 +63,39 @@ export class L1RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
   public async update(input: AdaptiveCacheBackendUpdateInput): Promise<AdaptiveCacheUpdateResult> {
     await this.lru.storeConservative(input)
 
-    this.redis
-      .update(input)
-      .then(async (result) => {
-        await this.lru.hydrateFromUpdate(input, result)
-        const changed = result[5] === 1
-        if (changed) {
-          await this.publishInvalidation([input.key])
-        }
-      })
-      .catch((err) => {
+    const redisUpdate = this.redis.update(input).then<AdaptiveCacheUpdateResult>(async (result) => {
+      await this.lru.hydrateFromUpdate(input, result)
+      const changed = result[5] === 1
+      if (changed) {
+        await this.publishInvalidation([input.key])
+      }
+      return result
+    })
+
+    const trackedUpdate = redisUpdate.then(
+      () => undefined,
+      () => undefined,
+    )
+    this.pendingUpdates.add(trackedUpdate)
+    trackedUpdate.then(() => this.pendingUpdates.delete(trackedUpdate))
+
+    if (this.writeMode === 'await-redis') {
+      return redisUpdate.catch((err) => {
         this.logger.error('Redis adaptive cache update failed after L1 write:', err)
+        throw err
       })
+    }
+
+    redisUpdate.catch((err) => {
+      this.logger.error('Redis adaptive cache update failed after L1 write:', err)
+    })
 
     return ['CACHED', input.initialTTL, Math.floor(Date.now() / 1000), 0, input.responseHash, 1]
   }
 
-  public async clear(key: string, dataKey: string) {
-    await this.lru.clear(key, dataKey)
-    await this.redis.clear(key, dataKey)
+  public async clear(key: string, dataKey: string, metaKey: string) {
+    await this.lru.clear(key, dataKey, metaKey)
+    await this.redis.clear(key, dataKey, metaKey)
     await this.publishInvalidation([key])
   }
 
@@ -117,12 +135,19 @@ export class L1RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
   }
 
   public async quit() {
+    await this.flush()
+
     if (this.subscriber) {
       await this.subscriber.quit()
       this.subscriber = undefined
     }
 
+    await this.lru.quit?.()
     await this.redis.quit?.()
+  }
+
+  public async flush() {
+    await Promise.allSettled(Array.from(this.pendingUpdates))
   }
 
   private subscribeInvalidations() {

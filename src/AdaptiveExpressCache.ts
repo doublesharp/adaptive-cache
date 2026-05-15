@@ -1,4 +1,3 @@
-import { NextFunction, Request, Response } from 'express'
 import { AdaptiveCache } from './AdaptiveCache'
 import { getDefaultCache } from './singleton'
 import { getAdaptiveCacheKey } from './utils'
@@ -6,13 +5,37 @@ import { AdaptiveCacheOptions } from './types'
 
 const DEFAULT_MAX_TTL = 60 * 15 // 15 minutes for adaptive cache
 
+type ExpressRequestLike = {
+  originalUrl: string
+  query: any
+  params?: Record<string, string>
+}
+
+type ExpressResponseLike = {
+  statusCode: number
+  send: (body: any) => any
+  set: (field: string, value: any) => any
+}
+
+type ExpressNextFunctionLike = (err?: unknown) => void
+
+const parseJsonBody = (body: any) => {
+  if (typeof body !== 'string') return body
+
+  try {
+    return JSON.parse(body)
+  } catch {
+    return body
+  }
+}
+
 const shouldShareDefaultRedisClient = (options: AdaptiveCacheOptions) =>
   !options.backend || options.backend === 'redis' || options.backend === 'l1-redis'
 
 // Adaptive caching middleware
 export const adaptiveExpressCache = (
   options: AdaptiveCacheOptions & {
-    tags?: string[] | ((req: Request) => string[])
+    tags?: string[] | ((req: ExpressRequestLike) => string[])
   } = {},
 ) => {
   const {
@@ -21,6 +44,7 @@ export const adaptiveExpressCache = (
     includeHeaders = true, // Default: include headers
     forceRefresh = false, // Default: use cache if available
     tags,
+    ignoreQueryParams,
   } = options
   const cachePrefix = keyPrefix || redisPrefix
 
@@ -36,19 +60,24 @@ export const adaptiveExpressCache = (
     AdaptiveCache.setDefaultLockExpirationSeconds(options.lockExpirationSeconds)
   }
 
-  return async (req: Request, res: Response, next: NextFunction) => {
+  return async (req: ExpressRequestLike, res: ExpressResponseLike, next: ExpressNextFunctionLike) => {
     // Check for cache override in query parameter
     const overrideCache = req.query.refresh === 'true' || forceRefresh
 
     const originalSend = res.send
 
     try {
-      const adaptiveCacheKey = getAdaptiveCacheKey(req.originalUrl.split('?')[0], req.query, cachePrefix)
+      const adaptiveCacheKey = getAdaptiveCacheKey(
+        req.originalUrl.split('?')[0],
+        req.query,
+        cachePrefix,
+        ignoreQueryParams,
+      )
 
       // First check if we have data
       const result = await cacheInstance.get(adaptiveCacheKey)
 
-      if (result && result.data && !overrideCache) {
+      if (result && !overrideCache) {
         try {
           if (includeHeaders) {
             res.set('X-Cache', 'HIT')
@@ -78,10 +107,10 @@ export const adaptiveExpressCache = (
         // Only cache successful responses
         if (res.statusCode >= 200 && res.statusCode < 300) {
           let currentMaxTTL = maxTTL
+          const bodyForCache = parseJsonBody(body)
           if (typeof maxTTL === 'function') {
-            // call function to convert to seconds
-            const calculatedTTL = maxTTL(body)
-            if (calculatedTTL) {
+            const calculatedTTL = maxTTL(bodyForCache)
+            if (typeof calculatedTTL === 'number' && Number.isFinite(calculatedTTL) && calculatedTTL > 0) {
               currentMaxTTL = calculatedTTL
             } else {
               currentMaxTTL = DEFAULT_MAX_TTL
@@ -99,7 +128,7 @@ export const adaptiveExpressCache = (
               }
             }
 
-            await cacheInstance.set(adaptiveCacheKey, body, {
+            await cacheInstance.set(adaptiveCacheKey, bodyForCache, {
               maxTTL: currentMaxTTL as number,
               tags: requestTags,
             })

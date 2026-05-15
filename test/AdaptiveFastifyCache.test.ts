@@ -110,10 +110,16 @@ describe('Adaptive Fastify Cache', () => {
     const res = await fastify.inject({ method: 'GET', url: '/refresh?refresh=true' })
     expect(res.headers['x-cache']).toBe('BYPASS')
     expect(callCount).toBe(2)
+
+    const hit = await fastify.inject({ method: 'GET', url: '/refresh' })
+    expect(hit.headers['x-cache']).toBe('HIT')
+    expect(JSON.parse(hit.payload)).toEqual({ count: 2 })
+    expect(callCount).toBe(2)
   })
 
   it('should handle maxTTL as a function and parse JSON payload', async () => {
     const fastify = Fastify()
+    const updateSpy = vi.spyOn(cacheModule.getDefaultCache().client, 'adaptiveCacheUpdate')
     fastify.register(
       cacheModule.adaptiveFastifyCache({
         maxTTL: (body) => {
@@ -128,7 +134,58 @@ describe('Adaptive Fastify Cache', () => {
 
     await fastify.inject({ method: 'GET', url: '/maxttl' })
     await new Promise((r) => setTimeout(r, 100))
-    // We can't easily verify the TTL set in Redis without checking the key, but this covers the code path
+    expect(updateSpy).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.any(String),
+      expect.any(String),
+      expect.any(String),
+      expect.any(String),
+      '20',
+      expect.any(String),
+      expect.any(String),
+    )
+  })
+
+  it('should serve cached falsy responses as hits', async () => {
+    const fastify = Fastify()
+    let callCount = 0
+
+    fastify.register(cacheModule.adaptiveFastifyCache({ initialTTL: 10 }))
+
+    fastify.get('/zero-response', async () => {
+      callCount++
+      return 0
+    })
+
+    await fastify.inject({ method: 'GET', url: '/zero-response' })
+    await new Promise((r) => setTimeout(r, 100))
+
+    const res2 = await fastify.inject({ method: 'GET', url: '/zero-response' })
+    expect(res2.headers['x-cache']).toBe('HIT')
+    expect(res2.payload).toBe('0')
+    expect(callCount).toBe(1)
+  })
+
+  it('should cache plain text responses', async () => {
+    const fastify = Fastify()
+    let callCount = 0
+
+    fastify.register(cacheModule.adaptiveFastifyCache({ initialTTL: 10 }))
+
+    fastify.get('/plain-text', async (_req, reply) => {
+      callCount++
+      reply.header('Content-Type', 'text/plain')
+      return 'plain text'
+    })
+
+    const first = await fastify.inject({ method: 'GET', url: '/plain-text' })
+    expect(first.payload).toBe('plain text')
+    await new Promise((r) => setTimeout(r, 100))
+
+    const second = await fastify.inject({ method: 'GET', url: '/plain-text' })
+    expect(second.headers['x-cache']).toBe('HIT')
+    expect(second.payload).toBe('plain text')
+    expect(callCount).toBe(1)
   })
 
   it('should use default maxTTL if function returns undefined', async () => {

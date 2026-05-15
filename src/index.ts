@@ -1,11 +1,24 @@
-import { AdaptiveCacheBackend, AdaptiveCacheBackendName, AdaptiveCacheLruOptions, AdaptiveCacheOptions } from './types'
+import {
+  AdaptiveCacheBackend,
+  AdaptiveCacheBackendName,
+  AdaptiveCacheL1RedisOptions,
+  AdaptiveCacheLruOptions,
+  AdaptiveCacheOptions,
+} from './types'
 import { AdaptiveCache } from './AdaptiveCache'
 import { getDefaultCache, redis } from './singleton'
 import { adaptiveExpressCache, clearAdaptiveCache } from './AdaptiveExpressCache'
 import { adaptiveFastifyCache } from './AdaptiveFastifyCache'
 import { cache } from './utils'
 
-export { AdaptiveCacheOptions, AdaptiveCacheBackend, AdaptiveCacheBackendName, AdaptiveCacheLruOptions, AdaptiveCache }
+export {
+  AdaptiveCacheOptions,
+  AdaptiveCacheBackend,
+  AdaptiveCacheBackendName,
+  AdaptiveCacheL1RedisOptions,
+  AdaptiveCacheLruOptions,
+  AdaptiveCache,
+}
 export { getDefaultCache, redis }
 export { adaptiveExpressCache, clearAdaptiveCache, adaptiveFastifyCache, cache }
 
@@ -22,12 +35,11 @@ export const cacheResult = async (key: string, timeInSeconds: number, callback: 
   // Fetch results from the callback
   const results = await callback()
 
-  if (!results) {
+  if (results === null || typeof results === 'undefined') {
     return null
   }
 
-  // Cache the collection stats for the time specified, we don't need to await here
-  client.set(key, JSON.stringify(results), 'EX', timeInSeconds)
+  await client.set(key, JSON.stringify(results), 'EX', timeInSeconds)
 
   return results
 }

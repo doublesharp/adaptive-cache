@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { cache, parseDuration, getAdaptiveCacheKey } from '../src/utils'
+import { cache, parseDuration, getAdaptiveCacheKey, normalizeCacheQuery } from '../src/utils'
 
 describe('utils', () => {
   describe('parseDuration', () => {
@@ -54,6 +54,26 @@ describe('utils', () => {
     it('should generate key', () => {
       const key = getAdaptiveCacheKey('/path', { q: 1 }, 'prefix:')
       expect(key).toContain('prefix:/path:')
+    })
+
+    it('should canonicalize query keys and ignore refresh by default', () => {
+      const first = getAdaptiveCacheKey('/path', { b: 2, a: 1 }, 'prefix:')
+      const second = getAdaptiveCacheKey('/path', { a: 1, b: 2, refresh: 'true' }, 'prefix:')
+
+      expect(first).toBe(second)
+      expect(normalizeCacheQuery({ refresh: 'true', q: '1', nested: { b: 2, a: 1 } })).toEqual({
+        nested: { a: 1, b: 2 },
+        q: '1',
+      })
+      expect(normalizeCacheQuery({ list: [{ b: 2, a: 1 }] })).toEqual({ list: [{ a: 1, b: 2 }] })
+      expect(normalizeCacheQuery(null)).toBeNull()
+    })
+
+    it('should support custom ignored query params', () => {
+      const first = getAdaptiveCacheKey('/path', { q: 1 }, 'prefix:', ['refresh', 'token'])
+      const second = getAdaptiveCacheKey('/path', { q: 1, token: 'abc' }, 'prefix:', ['refresh', 'token'])
+
+      expect(first).toBe(second)
     })
   })
 
