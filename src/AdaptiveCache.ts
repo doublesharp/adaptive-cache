@@ -10,6 +10,8 @@ import { L1RedisAdaptiveCacheBackend } from './backends/L1RedisAdaptiveCacheBack
 import { RedisAdaptiveCacheBackend } from './backends/RedisAdaptiveCacheBackend'
 import {
   AdaptiveCacheBackend,
+  AdaptiveCacheBackendFetchInput,
+  AdaptiveCacheFetchResult,
   AdaptiveCacheOptions,
   AdaptiveCacheSetOptions,
   AdaptiveCacheHit,
@@ -188,17 +190,25 @@ export class AdaptiveCache {
     return this.track(this.read<T>(key, options))
   }
 
-  private async read<T>(key: string, options: { allowStale?: boolean } = {}): Promise<AdaptiveCacheHit<T> | null> {
+  private fetchInput(key: string, options: { allowStale?: boolean }): AdaptiveCacheBackendFetchInput {
+    return {
+      key,
+      dataKey: key + 'data',
+      metaKey: key + 'meta',
+      redisPrefix: this.getKeyPrefix(),
+      includeDebugHeaders: this.options.includeDebugHeaders ?? false,
+      allowStale: options.allowStale,
+    }
+  }
+
+  private async read<T>(
+    key: string,
+    options: { allowStale?: boolean } = {},
+    fetch?: () => Promise<AdaptiveCacheFetchResult | null>,
+  ): Promise<AdaptiveCacheHit<T> | null> {
     const started = performance.now()
     try {
-      const result = await this.backend.fetch({
-        key,
-        dataKey: key + 'data',
-        metaKey: key + 'meta',
-        redisPrefix: this.getKeyPrefix(),
-        includeDebugHeaders: this.options.includeDebugHeaders ?? false,
-        allowStale: options.allowStale,
-      })
+      const result = await (fetch ? fetch() : this.backend.fetch(this.fetchInput(key, options)))
       if (!result) {
         this.emit({ type: 'miss', key, durationMs: performance.now() - started })
         return null
@@ -320,7 +330,23 @@ export class AdaptiveCache {
   }
 
   public async getMany<T = any>(keys: string[]): Promise<Map<string, AdaptiveCacheHit<T> | null>> {
-    return new Map(await Promise.all(keys.map(async (key) => [key, await this.get<T>(key)] as const)))
+    this.assertOpen()
+    if (!keys.length) return new Map()
+    if (!this.backend.fetchMany)
+      return new Map(await Promise.all(keys.map(async (key) => [key, await this.get<T>(key)] as const)))
+    const inputs = keys.map((key) => this.fetchInput(key, {}))
+    // Defer custom backend execution until every per-key read is tracked for close().
+    const batch = Promise.resolve().then(() => this.backend.fetchMany!(inputs))
+    const reads = inputs.map(({ key }, index) =>
+      this.track(
+        this.read<T>(key, {}, async () => {
+          const results = await batch
+          if (results.length !== inputs.length) throw new Error('Backend fetchMany result length must match inputs')
+          return results[index]
+        }),
+      ).then((hit) => [key, hit] as const),
+    )
+    return new Map(await Promise.all(reads))
   }
 
   public async setMany(

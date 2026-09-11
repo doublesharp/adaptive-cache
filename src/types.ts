@@ -200,6 +200,8 @@ export interface AdaptiveCacheBackend {
   invalidateNamespace?(redisPrefix: string): Promise<void>
   onEvent?(listener: (event: AdaptiveCacheEvent) => void): () => void
   fetch(input: AdaptiveCacheBackendFetchInput): Promise<AdaptiveCacheFetchResult | null>
+  /** Results must align with inputs, including duplicates. */
+  fetchMany?(inputs: AdaptiveCacheBackendFetchInput[]): Promise<Array<AdaptiveCacheFetchResult | null>>
   update(input: AdaptiveCacheBackendUpdateInput): Promise<AdaptiveCacheUpdateResult>
   clear(key: string, dataKey: string, metaKey: string, redisPrefix?: string): Promise<void>
   invalidateTags(tags: string[], redisPrefix: string): Promise<string[]>

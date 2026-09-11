@@ -1,3 +1,4 @@
+import { fetchLruMany, lruFetchResult } from './lruRead'
 import {
   type LruEnvelope,
   METADATA_SIZE_OVERHEAD_BYTES,
@@ -29,6 +30,7 @@ import {
 const DEFAULT_LRU_MAX_SIZE_BYTES = 64 * 1024 * 1024
 
 type ClusteredCache = {
+  mGet(keys: string[], opts?: { bypassL1?: boolean }): Promise<Map<string, any>>
   get(key: string, opts?: Record<string, unknown>): Promise<any>
   set(key: string, value: any, opts?: { ttl?: number; size?: number; updateL1?: boolean }): Promise<boolean>
   setIfAbsent(key: string, value: any, opts?: { ttl?: number; size?: number }): Promise<boolean>
@@ -152,19 +154,11 @@ export class ClusteredLruAdaptiveCacheBackend implements AdaptiveCacheBackend {
     for (const [key, epoch] of Object.entries(envelope.epochs || {})) {
       if (epoch !== (await this.generation(key))) return null
     }
-    const freshUntil = envelope.freshUntil ?? envelope.expiresAt
-    const stale = freshUntil <= Date.now()
-    if (stale && !input.allowStale) return null
+    return lruFetchResult(envelope, input)
+  }
 
-    return {
-      encodedData: envelope.encodedData,
-      writeToken: envelope.writeToken,
-      ttl: Math.max(0, Math.ceil((freshUntil - Date.now()) / 1000)),
-      stale,
-      staleAge: Math.max(0, (Date.now() - freshUntil) / 1000),
-      layer: 'lru',
-      metadata: metadataFromEnvelope(envelope),
-    }
+  public async fetchMany(inputs: AdaptiveCacheBackendFetchInput[]) {
+    return fetchLruMany(await this.getCache(), inputs)
   }
 
   public async update(input: AdaptiveCacheBackendUpdateInput): Promise<AdaptiveCacheUpdateResult> {
