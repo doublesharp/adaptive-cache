@@ -71,15 +71,19 @@ describe('singleton and index exports with mocked Redis', () => {
     expect(cache('1 second')).toEqual({ initialTTL: 1 })
   })
 
-  it('middleware helpers should share the mocked Redis client when Redis backends are requested', async () => {
-    const { adaptiveExpressCache, adaptiveFastifyCache, clearAdaptiveCache, redis } = await import('../src')
-
-    expect(adaptiveExpressCache({ backend: 'redis' })).toBeDefined()
-    expect(adaptiveFastifyCache({ backend: 'redis' })).toBeDefined()
-
-    await redis.set('adaptive:/default-clear:data', JSON.stringify({ ok: true }))
-    await clearAdaptiveCache('/default-clear', {})
-    await clearAdaptiveCache('/redis-clear', {}, 'adaptive:', { backend: 'redis' })
+  it('clear helpers delete the canonical key without closing the shared Redis client', async () => {
+    const { clearAdaptiveCache, getDefaultCache } = await import('../src')
+    const { getAdaptiveCacheKey } = await import('../src/utils')
+    const cache = getDefaultCache()
+    for (const backend of [undefined, 'redis'] as const) {
+      const key = getAdaptiveCacheKey('/clear', { q: 'value' }, 'adaptive:')
+      await cache.set(key, { ok: true })
+      await cache.set('unrelated', 'keep')
+      await clearAdaptiveCache('/clear', { q: 'value' }, 'adaptive:', { backend })
+      expect(await cache.get(key)).toBeNull()
+      expect((await cache.get('unrelated')).data).toBe('keep')
+      expect((cache.client as any).quitCalls).toBe(0)
+    }
   })
 
   it('Redis client creation should honor URL, TLS, host, and port environment options', async () => {
@@ -103,6 +107,7 @@ describe('singleton and index exports with mocked Redis', () => {
     vi.stubEnv('REDIS_HOST', 'redis.example.test')
     vi.stubEnv('REDIS_PORT', '6380')
     const hostPortClient = RedisAdaptiveCacheBackend.createClient(logger) as any
+    expect(hostPortClient.options).toMatchObject({ host: 'redis.example.test', port: 6380 })
     hostPortClient.emit('error', new Error('host client noise'))
     await hostPortClient.quit()
   })

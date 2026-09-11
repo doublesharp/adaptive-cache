@@ -34,7 +34,7 @@ const normalizeQueryValue = (value: any): any => {
     .reduce<Record<string, any>>((normalized, key) => {
       normalized[key] = normalizeQueryValue(value[key])
       return normalized
-    }, {})
+    }, Object.create(null))
 }
 
 export const normalizeCacheQuery = (querystring: any, ignoreQueryParams: string[] = DEFAULT_IGNORED_QUERY_PARAMS) => {
@@ -47,7 +47,7 @@ export const normalizeCacheQuery = (querystring: any, ignoreQueryParams: string[
     .reduce<Record<string, any>>((normalized, key) => {
       normalized[key] = normalizeQueryValue(querystring[key])
       return normalized
-    }, {})
+    }, Object.create(null))
 }
 
 export const getAdaptiveCacheKey = (

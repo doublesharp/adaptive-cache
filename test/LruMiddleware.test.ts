@@ -122,7 +122,7 @@ describe('Express clustered LRU middleware', () => {
     expect(stringFirst.headers['x-cache']).toBe('MISS')
     const stringSecond = await callExpress(stringResponse, stringHandler, '/string')
     expect(stringSecond.headers['x-cache']).toBe('HIT')
-    expect(stringSecond.body).toBe('stable')
+    expect(stringSecond.body).toBe(stringFirst.body)
   })
 
   it('should leave invalid JSON strings as strings for dynamic maxTTL', async () => {

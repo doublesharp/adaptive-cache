@@ -33,10 +33,6 @@ describe('utils', () => {
       expect(parseDuration('invalid')).toBe(5)
     })
 
-    it('should return default for invalid number string without unit', () => {
-      expect(parseDuration('invalid')).toBe(5)
-    })
-
     it('should return default for unknown unit', () => {
       expect(parseDuration('1 week')).toBe(5)
     })

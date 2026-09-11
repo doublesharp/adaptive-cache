@@ -35,6 +35,8 @@ export type {
 } from './types'
 export { getDefaultCache, redis }
 export { adaptiveExpressCache, clearAdaptiveCache, adaptiveFastifyCache, cache }
+export type { AdaptiveExpressCacheOptions, AdaptiveExpressCacheMiddleware } from './AdaptiveExpressCache'
+export type { AdaptiveFastifyCacheOptions, AdaptiveFastifyCachePlugin } from './AdaptiveFastifyCache'
 
 // Util to easily cache functions outside of the controller flow
 export const cacheResult = async (key: string, timeInSeconds: number, callback: () => Promise<any>) => {

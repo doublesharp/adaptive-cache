@@ -1,9 +1,9 @@
-import { getAdaptiveCacheKey } from '../src/utils'
 import { describe, it, expect, beforeAll, afterAll, vi, beforeEach } from 'vitest'
 import { GenericContainer, StartedTestContainer } from 'testcontainers'
 import express from 'express'
 import request from 'supertest'
 import Redis from 'ioredis'
+import { getAdaptiveCacheKey } from '../src/utils'
 
 // We need to delay importing the cache module until Redis is ready and env vars are set
 let cacheModule: typeof import('../src')
@@ -54,9 +54,6 @@ describe('Adaptive Express Cache', () => {
       await request(app).get('/test').expect(200)
       expect(callCount).toBe(1)
 
-      const key = getAdaptiveCacheKey('/test', {}, 'adaptive:')
-      await vi.waitFor(async () => expect(await redisClient.exists(key + 'data')).toBe(1))
-
       // Second call (cached)
       await request(app).get('/test').expect(200)
       expect(callCount).toBe(1)
@@ -103,6 +100,8 @@ describe('Adaptive Express Cache', () => {
         res.json({ ok: true })
       })
       await request(app).get('/invalid-duration').expect(200)
+      const key = getAdaptiveCacheKey('/invalid-duration', {}, 'adaptive:')
+      await vi.waitFor(async () => expect((await redisClient.hgetall(key + 'meta')).dataTTL).toBe('5'))
     })
   })
 
@@ -174,28 +173,23 @@ describe('Adaptive Express Cache', () => {
       expect(callCount).toBe(2)
     })
 
-    it('should handle maxTTL as a function', async () => {
+    it('should cap the actual stored TTL using the response body', async () => {
       const app = express()
       const maxTTL = vi.fn((body) => body.ttl)
-
-      app.get(
-        '/maxttl',
-        cacheModule.adaptiveExpressCache({
-          maxTTL,
-        }),
-        (req, res) => {
-          res.json({ ttl: 20 })
-        },
-      )
-
-      await request(app).get('/maxttl')
-      await new Promise((r) => setTimeout(r, 100))
-
-      expect(maxTTL).toHaveBeenCalledWith({ ttl: 20 })
-      const key = getAdaptiveCacheKey('/maxttl', {}, 'adaptive:')
-      expect((await redisClient.hgetall(key + 'meta')).dataTTL).toBe('5')
-      expect(await redisClient.ttl(key + 'data')).toBeGreaterThan(0)
-      expect(await redisClient.ttl(key + 'data')).toBeLessThanOrEqual(20)
+      const middleware = cacheModule.adaptiveExpressCache({ initialTTL: 30, maxTTL })
+      app.get('/maxttl', middleware, (_req, res) => res.json({ ttl: 20 }))
+      try {
+        await request(app).get('/maxttl').expect(200)
+        await middleware.flush()
+        expect(maxTTL).toHaveBeenCalledWith({ ttl: 20 })
+        const key = getAdaptiveCacheKey('/maxttl', {}, 'adaptive:')
+        const ttl = await redisClient.ttl(key + 'data')
+        expect(ttl).toBeGreaterThan(18)
+        expect(ttl).toBeLessThanOrEqual(20)
+        expect((await request(app).get('/maxttl')).headers['x-cache']).toBe('HIT')
+      } finally {
+        await middleware.close()
+      }
     })
 
     it('should serve cached falsy responses as hits', async () => {
@@ -243,6 +237,7 @@ describe('Adaptive Express Cache', () => {
       await new Promise((r) => setTimeout(r, 100))
 
       const res2 = await request(app).get('/compress')
+      expect(res2.headers['x-cache']).toBe('HIT')
       expect(res2.body.large).toBe('data'.repeat(100))
     })
 
@@ -256,6 +251,7 @@ describe('Adaptive Express Cache', () => {
       await new Promise((r) => setTimeout(r, 100))
 
       const res2 = await request(app).get('/no-compress')
+      expect(res2.headers['x-cache']).toBe('HIT')
       expect(res2.body.data).toBe('raw')
     })
 
@@ -358,24 +354,20 @@ describe('Adaptive Express Cache', () => {
 
       // Manually modify metadata to remove lastChanged
       const keys = await redisClient.keys('adaptive:*:meta')
-      if (keys.length > 0) {
-        await redisClient.hdel(keys[0], 'lastChanged')
-      }
+      expect(keys).toHaveLength(1)
+      await redisClient.hdel(keys[0], 'lastChanged')
 
       const res = await request(app).get('/missing-last-changed')
       expect(res.headers['x-cache-last-modified']).toBe('unknown')
     })
 
     it('should use default maxTTL if function returns undefined', async () => {
-      const { Logger } = await import('../src/lib/logger')
-      const debugSpy = vi.spyOn(Logger.prototype, 'debug')
-
       const app = express()
       app.get(
         '/maxttl-default',
         cacheModule.adaptiveExpressCache({
           maxTTL: () => undefined,
-          logLevel: 'debug',
+          initialTTL: 2000,
         }),
         (req, res) => {
           res.json({ ok: true })
@@ -383,12 +375,15 @@ describe('Adaptive Express Cache', () => {
       )
       await request(app).get('/maxttl-default').expect(200)
 
-      expect(debugSpy).toHaveBeenCalledWith('Overriding maxTTL:', 900)
+      const key = getAdaptiveCacheKey('/maxttl-default', {}, 'adaptive:')
+      await vi.waitFor(async () => expect((await redisClient.hgetall(key + 'meta')).dataTTL).toBe('900'))
     })
 
     it('should respect includeHeaders: false on HIT', async () => {
       const app = express()
+      let calls = 0
       app.get('/no-headers-hit', cacheModule.adaptiveExpressCache({ includeHeaders: false }), (req, res) => {
+        calls++
         res.json({ ok: true })
       })
       // Miss
@@ -397,6 +392,7 @@ describe('Adaptive Express Cache', () => {
       // Hit
       const res = await request(app).get('/no-headers-hit').expect(200)
       expect(res.headers['x-cache']).toBeUndefined()
+      expect(calls).toBe(1)
     })
 
     it('should handle object body in res.send', async () => {
@@ -406,6 +402,11 @@ describe('Adaptive Express Cache', () => {
       })
 
       await request(app).get('/obj-send').expect(200)
+      await vi.waitFor(async () => {
+        const hit = await request(app).get('/obj-send')
+        expect(hit.headers['x-cache']).toBe('HIT')
+        expect(hit.body).toEqual({ data: 'obj' })
+      })
     })
 
     it('should handle errors during cache hit response', async () => {
@@ -423,6 +424,7 @@ describe('Adaptive Express Cache', () => {
         const originalSend = res.send
         res.send = function (body: any) {
           if (req.headers['x-trigger-error']) {
+            delete req.headers['x-trigger-error']
             throw new Error('Send failed')
           }
           return originalSend.call(res, body)
@@ -441,6 +443,8 @@ describe('Adaptive Express Cache', () => {
       // Trigger error
       const res = await request(app2).get('/hit-error-2').set('X-Trigger-Error', 'true')
       expect(res.headers['x-cache']).toBe('RETRY')
+      expect(res.status).toBe(200)
+      expect(res.body).toEqual({ ok: true })
     })
   })
 
@@ -515,6 +519,11 @@ describe('Adaptive Express Cache', () => {
       )
 
       await request(app).get('/invalid-tags').expect(200)
+      await vi.waitFor(async () => {
+        const hit = await request(app).get('/invalid-tags')
+        expect(hit.headers['x-cache']).toBe('HIT')
+        expect(hit.body).toEqual({ ok: true })
+      })
     })
   })
 
@@ -554,5 +563,7 @@ describe('Adaptive Express Cache', () => {
 
     await request(app).get('/default-cache').expect(200)
     await request(app).get('/default-cache-success').expect(200)
+    const key = getAdaptiveCacheKey('/default-cache', {}, 'adaptive:')
+    await vi.waitFor(async () => expect((await redisClient.hgetall(key + 'meta')).dataTTL).toBe('5'))
   })
 })

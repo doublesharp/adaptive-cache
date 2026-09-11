@@ -1,8 +1,8 @@
-import { getAdaptiveCacheKey } from '../src/utils'
 import { describe, it, expect, beforeAll, afterAll, vi, beforeEach } from 'vitest'
 import { GenericContainer, StartedTestContainer } from 'testcontainers'
 import Fastify from 'fastify'
 import Redis from 'ioredis'
+import { getAdaptiveCacheKey } from '../src/utils'
 
 let cacheModule: typeof import('../src')
 let redisClient: Redis
@@ -112,34 +112,30 @@ describe('Adaptive Fastify Cache', () => {
     expect(res.headers['x-cache']).toBe('BYPASS')
     expect(callCount).toBe(2)
 
-    const key = getAdaptiveCacheKey('/refresh', {}, 'adaptive:')
-    await vi.waitFor(async () => expect(JSON.parse((await cacheModule.getDefaultCache().get(key)).data)).toEqual({ count: 2 }))
     const hit = await fastify.inject({ method: 'GET', url: '/refresh' })
     expect(hit.headers['x-cache']).toBe('HIT')
     expect(JSON.parse(hit.payload)).toEqual({ count: 2 })
     expect(callCount).toBe(2)
   })
 
-  it('should handle maxTTL as a function and parse JSON payload', async () => {
+  it('should cap the actual stored TTL using the parsed JSON payload', async () => {
     const fastify = Fastify()
-    fastify.register(
-      cacheModule.adaptiveFastifyCache({
-        maxTTL: (body) => {
-          return body.ttl
-        },
-      }),
-    )
-
-    fastify.get('/maxttl', async () => {
-      return { ttl: 20 }
-    })
-
-    await fastify.inject({ method: 'GET', url: '/maxttl' })
-    await new Promise((r) => setTimeout(r, 100))
-    const key = getAdaptiveCacheKey('/maxttl', {}, 'adaptive:')
-    expect((await redisClient.hgetall(key + 'meta')).dataTTL).toBe('5')
-    expect(await redisClient.ttl(key + 'data')).toBeGreaterThan(0)
-    expect(await redisClient.ttl(key + 'data')).toBeLessThanOrEqual(20)
+    const maxTTL = vi.fn((body) => body.ttl)
+    const plugin = cacheModule.adaptiveFastifyCache({ initialTTL: 30, maxTTL })
+    fastify.register(plugin)
+    fastify.get('/maxttl', async () => ({ ttl: 20 }))
+    try {
+      expect((await fastify.inject('/maxttl')).statusCode).toBe(200)
+      await plugin.flush()
+      expect(maxTTL).toHaveBeenCalledWith({ ttl: 20 })
+      const key = getAdaptiveCacheKey('/maxttl', {}, 'adaptive:')
+      const ttl = await redisClient.ttl(key + 'data')
+      expect(ttl).toBeGreaterThan(18)
+      expect(ttl).toBeLessThanOrEqual(20)
+      expect((await fastify.inject('/maxttl')).headers['x-cache']).toBe('HIT')
+    } finally {
+      await fastify.close()
+    }
   })
 
   it('should serve cached falsy responses as hits', async () => {
@@ -185,14 +181,11 @@ describe('Adaptive Fastify Cache', () => {
   })
 
   it('should use default maxTTL if function returns undefined', async () => {
-    const { Logger } = await import('../src/lib/logger')
-    const debugSpy = vi.spyOn(Logger.prototype, 'debug')
-
     const fastify = Fastify()
     fastify.register(
       cacheModule.adaptiveFastifyCache({
         maxTTL: () => undefined,
-        logLevel: 'debug',
+        initialTTL: 2000,
       }),
     )
 
@@ -201,9 +194,8 @@ describe('Adaptive Fastify Cache', () => {
     })
 
     await fastify.inject({ method: 'GET', url: '/maxttl-default' })
-    await new Promise((r) => setTimeout(r, 100))
-
-    expect(debugSpy).toHaveBeenCalledWith('Overriding maxTTL:', 900)
+    const key = getAdaptiveCacheKey('/maxttl-default', {}, 'adaptive:')
+    await vi.waitFor(async () => expect((await redisClient.hgetall(key + 'meta')).dataTTL).toBe('900'))
   })
 
   it('should handle cache update failure', async () => {
@@ -265,16 +257,13 @@ describe('Adaptive Fastify Cache', () => {
   })
 
   it('should handle maxTTL as a function returning a value', async () => {
-    const { Logger } = await import('../src/lib/logger')
-    const debugSpy = vi.spyOn(Logger.prototype, 'debug')
-
     const fastify = Fastify()
     fastify.register(
       cacheModule.adaptiveFastifyCache({
         maxTTL: (_body) => {
           return 123 // Return a specific TTL
         },
-        logLevel: 'debug',
+        initialTTL: 2000,
       }),
     )
 
@@ -283,9 +272,8 @@ describe('Adaptive Fastify Cache', () => {
     })
 
     await fastify.inject({ method: 'GET', url: '/maxttl-fn' })
-    await new Promise((r) => setTimeout(r, 100))
-
-    expect(debugSpy).toHaveBeenCalledWith('Overriding maxTTL:', 123)
+    const key = getAdaptiveCacheKey('/maxttl-fn', {}, 'adaptive:')
+    await vi.waitFor(async () => expect((await redisClient.hgetall(key + 'meta')).dataTTL).toBe('123'))
   })
 
   it('should handle tags as a function', async () => {
@@ -322,7 +310,14 @@ describe('Adaptive Fastify Cache', () => {
       return 'invalid-json-string'
     })
 
-    await fastify.inject({ method: 'GET', url: '/invalid-json' })
+    const first = await fastify.inject({ method: 'GET', url: '/invalid-json' })
+    expect(first.statusCode).toBe(200)
+    expect(first.payload).toBe('invalid-json-string')
+    await vi.waitFor(async () => {
+      const hit = await fastify.inject('/invalid-json')
+      expect(hit.headers['x-cache']).toBe('HIT')
+      expect(hit.payload).toBe(first.payload)
+    })
     await new Promise((r) => setTimeout(r, 100))
   })
 
@@ -355,7 +350,14 @@ describe('Adaptive Fastify Cache', () => {
       return '{"invalid": json'
     })
 
-    await fastify.inject({ method: 'GET', url: '/bad-json' })
+    const first = await fastify.inject({ method: 'GET', url: '/bad-json' })
+    expect(first.statusCode).toBe(200)
+    expect(first.payload).toBe('{"invalid": json')
+    await vi.waitFor(async () => {
+      const hit = await fastify.inject('/bad-json')
+      expect(hit.headers['x-cache']).toBe('HIT')
+      expect(hit.payload).toBe(first.payload)
+    })
   })
 
   it('should handle onRequest failure (get throws)', async () => {
@@ -396,7 +398,9 @@ describe('Adaptive Fastify Cache', () => {
     const fastify = Fastify()
     fastify.register(cacheModule.adaptiveFastifyCache({ includeHeaders: false }))
 
+    let calls = 0
     fastify.get('/no-headers-hit', async () => {
+      calls++
       return { ok: true }
     })
 
@@ -411,6 +415,7 @@ describe('Adaptive Fastify Cache', () => {
 
     expect(res.headers['x-cache']).toBeUndefined()
     expect(JSON.parse(res.payload)).toEqual({ ok: true })
+    expect(calls).toBe(1)
   })
 
   it('should handle missing lastChanged in metadata', async () => {
@@ -446,6 +451,13 @@ describe('Adaptive Fastify Cache', () => {
       return { ok: true }
     })
 
-    await fastify.inject({ method: 'GET', url: '/invalid-tags' })
+    const first = await fastify.inject({ method: 'GET', url: '/invalid-tags' })
+    expect(first.statusCode).toBe(200)
+    expect(first.payload).toBe('{"ok":true}')
+    await vi.waitFor(async () => {
+      const hit = await fastify.inject('/invalid-tags')
+      expect(hit.headers['x-cache']).toBe('HIT')
+      expect(hit.payload).toBe(first.payload)
+    })
   })
 })
