@@ -18,7 +18,7 @@ export type ExpressRequestLike = {
   method?: string
   originalUrl: string
   query: any
-  params?: Record<string, string>
+  params?: Record<string, string | string[]>
   headers?: Record<string, unknown>
   get?: (name: string) => unknown
   header?: (name: string) => unknown
