@@ -4,6 +4,7 @@ import { performance } from 'node:perf_hooks'
 import { encode, decode, fingerprint } from './payload'
 import { Logger } from './lib/logger'
 import { CacheLoader } from './CacheLoader'
+import { normalizeTtlPolicy, validateTtlPolicySeed } from './ttlPolicy'
 import { ClusteredLruAdaptiveCacheBackend } from './backends/ClusteredLruAdaptiveCacheBackend'
 import { L1RedisAdaptiveCacheBackend } from './backends/L1RedisAdaptiveCacheBackend'
 import { RedisAdaptiveCacheBackend } from './backends/RedisAdaptiveCacheBackend'
@@ -53,6 +54,7 @@ export class AdaptiveCache {
   private backend: AdaptiveCacheBackend
   private redisClient?: Redis
   private readonly loader: CacheLoader
+  private readonly ttlPolicy: ReturnType<typeof normalizeTtlPolicy>
   private readonly pending = new Set<Promise<unknown>>()
   private readonly listeners = new Set<(event: AdaptiveCacheEvent) => void>()
   private readonly stats: AdaptiveCacheStats = {
@@ -75,14 +77,18 @@ export class AdaptiveCache {
 
   constructor(options: AdaptiveCacheOptions = {}, client?: Redis) {
     validateSettings(options)
+    this.ttlPolicy = normalizeTtlPolicy(options.ttlPolicy)
     for (const name of ['initialTTL', 'ttlScaling', 'metaTTL', 'lockExpirationSeconds'] as const)
       validateNumber(name, options[name], 0, false)
     if (options.metaTTL !== undefined && !Number.isInteger(options.metaTTL))
       throw new RangeError('metaTTL must be a positive integer number of seconds')
     validateNumber('compression.minBytes', options.compression?.minBytes)
+    validateTtlPolicySeed(this.ttlPolicy, options.initialTTL ?? 5)
     this.options = options
     this.logger = new Logger(options.logLevel || 'info')
     this.backend = this.createBackend(options, client)
+    if (this.ttlPolicy.type !== 'adaptive' && !this.backend.supportsTtlPolicies)
+      throw new Error('Backend does not support configurable TTL policies')
     this.loader = new CacheLoader({
       options: this.options,
       backend: this.backend,
@@ -264,6 +270,7 @@ export class AdaptiveCache {
     try {
       const { initialTTL = 5, ttlScaling = 2, metaTTL = 60 * 60 * 24 * 7 } = this.options
       const maxTTL = this.resolveMaxTTL(data, options)
+      validateTtlPolicySeed(this.ttlPolicy, Math.min(initialTTL, maxTTL))
       const writeToken = options.writeToken ?? (await this.backend.captureWriteToken?.(this.getKeyPrefix()))
       if (this.options.compression?.async && writeToken === undefined)
         throw new Error('Backend does not support captureWriteToken required for asynchronous encoding')
@@ -279,6 +286,7 @@ export class AdaptiveCache {
         initialTTL: Math.min(initialTTL, maxTTL),
         maxTTL,
         ttlScaling,
+        ...(this.ttlPolicy.type === 'adaptive' ? {} : { ttlPolicy: this.ttlPolicy }),
         metaTTL,
         tags: options.tags || [],
         writeToken,

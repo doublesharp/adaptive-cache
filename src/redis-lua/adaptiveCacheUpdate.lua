@@ -43,9 +43,12 @@ if old[1] and old[2] then
 end
 
 -- Fetch only the fields used for TTL adaptation.
-local metaData = redis.call('HMGET', metaKey, 'dataTTL', 'lastChanged', 'changeCount', 'hash')
+local metaData = redis.call('HMGET', metaKey, 'dataTTL', 'lastChanged', 'changeCount', 'hash', 'ttlPolicyState')
 local clock = redis.call('TIME')
 local nowMs = tonumber(clock[1]) * 1000 + math.floor(tonumber(clock[2]) / 1000)
+local policy = ARGV[16] and cjson.decode(ARGV[16]) or {type = 'adaptive'}
+local policyState = metaData[5] and cjson.decode(metaData[5]) or nil
+local nextPolicyState = nil
 
 -- Initialize values
 local dataTTL = tonumber(metaData[1]) or initialTTL
@@ -54,7 +57,45 @@ local now = isChanged and tonumber(clock[1]) or nil
 local lastChanged = isChanged and now or tonumber(metaData[2]) or 0
 local changeCount = tonumber(metaData[3] or "0")
 
-if not isChanged then
+if policy.type ~= 'adaptive' then
+    local mass = 0
+    if policy.type == 'ewma' then
+        local p = policy.targetChangeProbability
+        -- log(1-p) loses small probabilities to cancellation.
+        mass = p < 0.0001 and (p + p^2/2 + p^3/3 + p^4/4 + p^5/5) or -math.log(1-p)
+    end
+    if not policyState or policyState.signature ~= ARGV[16] then
+        dataTTL = initialTTL
+        nextPolicyState = {signature = ARGV[16], observedAt = nowMs, observedHash = hash, changeRate = mass / initialTTL}
+    else
+        nextPolicyState = policyState
+        local target = dataTTL
+        local shouldRound = true
+        if policy.type == 'aimd' then
+            target = isChanged and dataTTL * policy.decreaseFactor or dataTTL + policy.increaseSeconds
+        else
+            local elapsed = (nowMs - policyState.observedAt) / 1000
+            if elapsed > 0 then
+                local x = math.log(2) * elapsed / policy.halfLifeSeconds
+                local alpha = x < 0.0001 and (x - x^2/2 + x^3/6 - x^4/24 + x^5/120) or 1-math.exp(-x)
+                local sample = policyState.observedHash ~= hash and 1/elapsed or 0
+                local rate = (1-alpha) * policyState.changeRate + alpha * sample
+                nextPolicyState = {signature = ARGV[16], observedAt = nowMs, observedHash = hash, changeRate = rate}
+                target = rate > 0 and mass/rate or maxTTL
+            else
+                shouldRound = false
+            end
+        end
+        -- AIMD uses exact ceil; EWMA tolerates only tiny, bounded cjson roundoff.
+        target = math.max(initialTTL, math.min(maxTTL, target))
+        local tolerance = policy.type == 'ewma' and math.min(0.0000001, math.abs(target) * 1e-12) or 0
+        dataTTL = shouldRound and math.ceil(target - tolerance) or target
+        dataTTL = math.max(initialTTL, math.min(maxTTL, dataTTL))
+    end
+elseif policyState then
+    -- Switching back to adaptive starts a new history; legacy adaptive metadata has no state.
+    dataTTL = initialTTL
+elseif not isChanged then
     -- Calculate new TTL
     if dataTTL >= maxTTL then
         dataTTL = maxTTL
@@ -71,6 +112,11 @@ else
 end
 
 if isChanged then changeCount = changeCount + 1 end
+if nextPolicyState then
+    redis.call('HSET', metaKey, 'ttlPolicyState', cjson.encode(nextPolicyState))
+else
+    redis.call('HDEL', metaKey, 'ttlPolicyState')
+end
 dataTTL = math.min(dataTTL, maxTTL)
 local freshTTL = math.max(0.001, dataTTL * tonumber(ARGV[12] or '1'))
 local staleTTL = math.max(0, tonumber(ARGV[11] or '0'))
@@ -104,4 +150,6 @@ redis.call('EXPIRE', metaKey, metaTTL)
 local envelope = {data = data, prefix = prefix, namespace = generation, freshUntil = nowMs + math.floor(freshTTL * 1000), epochs = epochs, tags = cjson.decode(tags)}
 redis.call('SET', dataKey, '@ac-redis:1:' .. cjson.encode(envelope), 'PX', retentionMs)
 
-return {'CACHED', dataTTL, lastChanged, changeCount, hash, isChanged and 1 or 0}
+-- RESP numeric replies truncate fractions. Preserve new-policy caps as decimal text.
+local resultTTL = policy.type == 'adaptive' and dataTTL or string.format('%.17g', dataTTL)
+return {'CACHED', resultTTL, lastChanged, changeCount, hash, isChanged and 1 or 0}

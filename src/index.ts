@@ -20,6 +20,8 @@ export {
   AdaptiveCache,
 }
 export type {
+  AdaptiveCacheTtlPolicy,
+  AdaptiveCacheTtlPolicyState,
   AdaptiveCacheHit,
   AdaptiveCacheSetOptions,
   AdaptiveCacheLoadOptions,

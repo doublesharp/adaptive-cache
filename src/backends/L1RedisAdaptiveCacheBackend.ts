@@ -25,6 +25,7 @@ const clientStates = new WeakMap<Redis, ClientState>()
 
 export class L1RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
   public readonly name = 'l1-redis' as const
+  public readonly supportsTtlPolicies = true
   public readonly client: Redis
   private readonly redis: RedisAdaptiveCacheBackend
   private readonly lru: ClusteredLruAdaptiveCacheBackend

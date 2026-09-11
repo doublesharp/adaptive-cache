@@ -51,6 +51,7 @@ export class ClusteredLruAdaptiveCacheBackend implements AdaptiveCacheBackend {
   public static loadModule = () => requireOptional('@0xdoublesharp/lru-cache-clustered')
 
   public readonly name = 'clustered-lru' as const
+  public readonly supportsTtlPolicies = true
   private readonly logger: Logger
   private readonly options: AdaptiveCacheLruOptions
   private readonly maxSizeBytes: number
@@ -184,10 +185,20 @@ export class ClusteredLruAdaptiveCacheBackend implements AdaptiveCacheBackend {
       if (input.lockKey && (await cache.get(input.lockKey, { bypassL1: true })) !== input.lockValue)
         return ['INVALIDATED', 0]
       const previous = (await cache.get(input.metaKey, { bypassL1: true })) as AdaptiveCacheMetadata | undefined
-      const next = calculateNextMetadata(previous, input.responseHash, input.initialTTL, input.maxTTL, input.ttlScaling)
+      const next = calculateNextMetadata(
+        previous,
+        input.responseHash,
+        input.initialTTL,
+        input.maxTTL,
+        input.ttlScaling,
+        input.ttlPolicy,
+        Date.now(),
+        epochs[input.redisPrefix + '__adaptive:namespace'],
+      )
 
       const envelope = createEnvelope(input, {
         ...next,
+        namespaceGeneration: epochs[input.redisPrefix + '__adaptive:namespace'],
         hash: input.responseHash,
       })
 

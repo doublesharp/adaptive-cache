@@ -223,6 +223,7 @@ export class FakeRedis {
     lockKey = '',
     lockValue = '',
     uuid = randomUUID(),
+    policyJSON = '{"type":"adaptive"}',
   ) {
     if (this.failUpdate) throw new Error('update failed')
     if (lockKey && (await this.get(lockKey)) !== lockValue) return ['INVALIDATED', 0]
@@ -267,7 +268,15 @@ export class FakeRedis {
     const maxTTL = Number(maxTTLString)
     const ttlScaling = Number(ttlScalingString)
     const meta = this.stores.hashes.get(metaKey) || {}
-    const calculated = calculateNextMetadata(meta, hash, initialTTL, maxTTL, ttlScaling, Date.now())
+    const calculated = calculateNextMetadata(
+      { ...meta, ttlPolicyState: meta.ttlPolicyState ? JSON.parse(meta.ttlPolicyState) : undefined },
+      hash,
+      initialTTL,
+      maxTTL,
+      ttlScaling,
+      JSON.parse(policyJSON),
+      Date.now(),
+    )
     let { dataTTL } = calculated
     const { lastChanged, changeCount, changed: isChanged } = calculated
     this.stores.hashes.set(metaKey, {
@@ -275,6 +284,7 @@ export class FakeRedis {
       dataTTL: String(dataTTL),
       lastChanged: String(lastChanged),
       changeCount: String(changeCount),
+      ...(calculated.ttlPolicyState ? { ttlPolicyState: JSON.stringify(calculated.ttlPolicyState) } : {}),
     })
     dataTTL = Math.min(dataTTL, maxTTL)
     const freshTTL = dataTTL * Number(jitterFactor)

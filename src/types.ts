@@ -68,12 +68,25 @@ declare module 'ioredis' {
 
 export type AdaptiveCacheBackendName = 'redis' | 'l1-redis' | 'clustered-lru'
 
+export type AdaptiveCacheTtlPolicy =
+  | { type: 'adaptive' }
+  | { type: 'aimd'; increaseSeconds?: number; decreaseFactor?: number }
+  | { type: 'ewma'; halfLifeSeconds?: number; targetChangeProbability?: number }
+
+export interface AdaptiveCacheTtlPolicyState {
+  signature: string
+  observedAt: number
+  observedHash: string
+  changeRate: number
+}
+
 export interface AdaptiveCacheMetadata {
   dataTTL?: string | number
   lastChanged?: string | number
   changeCount?: string | number
   hash?: string
   changed?: boolean
+  ttlPolicyState?: AdaptiveCacheTtlPolicyState
 }
 
 export interface AdaptiveCacheFetchResult {
@@ -160,6 +173,7 @@ export interface AdaptiveCacheBackendFetchInput {
 }
 
 export interface AdaptiveCacheBackendUpdateInput {
+  ttlPolicy?: AdaptiveCacheTtlPolicy
   key: string
   dataKey: string
   metaKey: string
@@ -181,6 +195,7 @@ export interface AdaptiveCacheBackendUpdateInput {
 
 export interface AdaptiveCacheBackend {
   readonly name: AdaptiveCacheBackendName | 'custom'
+  readonly supportsTtlPolicies?: boolean
   captureWriteToken?(redisPrefix: string): Promise<string>
   invalidateNamespace?(redisPrefix: string): Promise<void>
   onEvent?(listener: (event: AdaptiveCacheEvent) => void): () => void
@@ -237,6 +252,7 @@ export interface AdaptiveCacheL1RedisOptions {
 }
 
 export interface AdaptiveCacheOptions {
+  ttlPolicy?: AdaptiveCacheTtlPolicy
   initialTTL?: number // Initial TTL for data in seconds
   maxTTL?: number | ((data: any) => number | undefined) // Maximum TTL for data in seconds or function that returns TTL
   ttlScaling?: number // Factor to multiply TTL on unchanged content

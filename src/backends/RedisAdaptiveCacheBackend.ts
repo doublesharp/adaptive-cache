@@ -1,3 +1,4 @@
+import { normalizeTtlPolicy } from '../ttlPolicy'
 import Redis from 'ioredis'
 import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
@@ -65,6 +66,7 @@ const shouldRejectUnauthorizedTls = () =>
 
 export class RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
   public readonly name = 'redis' as const
+  public readonly supportsTtlPolicies = true
   public readonly client: Redis
   private readonly logger: Logger
   private readonly ownsClient: boolean
@@ -168,8 +170,10 @@ export class RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
       input.lockKey || '',
       input.lockValue || '',
       randomUUID(),
+      JSON.stringify(normalizeTtlPolicy(input.ttlPolicy)),
     )
 
+    result[1] = Number(result[1])
     return result
   }
 
