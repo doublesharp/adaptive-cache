@@ -1,3 +1,5 @@
+import { calculateNextMetadata } from '../../src/backends/lruEnvelope'
+import { randomUUID } from 'node:crypto'
 import { URL } from 'node:url'
 
 type PipelineCommand = () => void
@@ -6,8 +8,6 @@ interface StoredValue {
   value: string
   expiresAt?: number
 }
-
-const nowSeconds = () => Math.floor(Date.now() / 1000)
 
 export class FakeRedis {
   public status = 'ready'
@@ -91,6 +91,16 @@ export class FakeRedis {
     return entry.value
   }
 
+  async setnx(key: string, value: string) {
+    if ((await this.get(key)) !== null) return 0
+    await this.set(key, value)
+    return 1
+  }
+
+  async mget(...keys: string[]) {
+    return Promise.all(keys.map((key) => this.get(key)))
+  }
+
   async set(key: string, value: string | number, mode?: string, ttl?: number) {
     const entry: StoredValue = { value: String(value) }
     if (mode === 'EX' && typeof ttl === 'number') entry.expiresAt = Date.now() + ttl * 1000
@@ -167,12 +177,32 @@ export class FakeRedis {
     }
   }
 
-  async adaptiveCacheFetch(dataKey: string) {
+  async adaptiveCacheFetch(dataKey: string, allowStale = '0') {
     if (this.failFetch) throw new Error('fetch failed')
-    const data = await this.get(dataKey)
+    let data = await this.get(dataKey)
     if (!data) return [null, 0]
     const meta = this.stores.hashes.get(dataKey.replace(/data$/, 'meta')) || {}
-    return [data, await this.ttl(dataKey), meta.dataTTL, meta.lastChanged, meta.changeCount, meta.hash]
+    let freshUntil: number | undefined
+    if (data.startsWith('@ac-redis:1:')) {
+      const envelope = JSON.parse(data.slice('@ac-redis:1:'.length))
+      if (envelope.namespace !== (await this.get(envelope.prefix + '__adaptive:namespace'))) return [null, 0]
+      for (const [key, epoch] of Object.entries(envelope.epochs)) if ((await this.get(key)) !== epoch) return [null, 0]
+      freshUntil = envelope.freshUntil
+      data = envelope.data
+    }
+    const remaining = freshUntil !== undefined ? freshUntil - Date.now() : (await this.ttl(dataKey)) * 1000
+    const stale = remaining <= 0
+    if (stale && allowStale !== '1') return [null, 0]
+    return [
+      data,
+      Math.max(0, Math.floor(remaining / 1000)),
+      meta.dataTTL,
+      meta.lastChanged,
+      meta.changeCount,
+      meta.hash,
+      stale ? 1 : 0,
+      Math.max(0, -remaining),
+    ]
   }
 
   async adaptiveCacheUpdate(
@@ -184,43 +214,128 @@ export class FakeRedis {
     maxTTLString: string,
     ttlScalingString: string,
     metaTTLString: string,
+    writeToken = '',
+    prefix = '',
+    key = dataKey.replace(/data$/, ''),
+    tagsJSON = '[]',
+    staleTTLString = '0',
+    jitterFactor = '1',
+    lockKey = '',
+    lockValue = '',
+    uuid = randomUUID(),
   ) {
     if (this.failUpdate) throw new Error('update failed')
+    if (lockKey && (await this.get(lockKey)) !== lockValue) return ['INVALIDATED', 0]
+    const [legacy, barrier, storedGeneration] = await this.mget(
+      '__adaptive:legacy-barrier',
+      prefix + '__adaptive:barrier',
+      prefix + '__adaptive:namespace',
+    )
+    if (
+      writeToken &&
+      (!legacy || !barrier || !storedGeneration || writeToken !== [legacy, barrier, storedGeneration].join(':'))
+    )
+      return ['INVALIDATED', 0]
+    let old = this.stores.hashes.get(dataKey + ':state')
+    const previousData = await this.get(dataKey)
+    if (!old && previousData?.startsWith('@ac-redis:1:')) {
+      const previous = JSON.parse(previousData.slice('@ac-redis:1:'.length))
+      old = { prefix: previous.prefix, tags: JSON.stringify(previous.tags), generation: previous.namespace }
+    }
+    for (const tag of JSON.parse(old?.tags || '[]'))
+      this.stores.sets.get((old?.prefix || '') + 'tag:' + tag)?.delete(key)
+    const generation = storedGeneration || uuid
+    await this.setnx(prefix + '__adaptive:namespace', generation)
+    if (old && old.generation !== generation) this.stores.hashes.delete(metaKey)
+    const epochs: Record<string, string> = {}
+    for (const tag of JSON.parse(tagsJSON)) {
+      const epochKey = prefix + '__adaptive:tag-epoch:' + tag
+      await this.setnx(epochKey, uuid)
+      epochs[epochKey] = (await this.get(epochKey))!
+      const epoch = this.stores.values.get(epochKey)!
+      epoch.expiresAt = Math.max(
+        epoch.expiresAt || 0,
+        Date.now() + Math.max(Number(metaTTLString), Number(maxTTLString) + Number(staleTTLString)) * 1000,
+      )
+      const tagKey = prefix + 'tag:' + tag
+      const members = this.stores.sets.get(tagKey) || new Set<string>()
+      members.add(key)
+      this.stores.sets.set(tagKey, members)
+    }
 
     const initialTTL = Number(initialTTLString)
     const maxTTL = Number(maxTTLString)
     const ttlScaling = Number(ttlScalingString)
     const meta = this.stores.hashes.get(metaKey) || {}
-    let dataTTL = Number(meta.dataTTL) || initialTTL
-    const isChanged = Object.keys(meta).length === 0 || meta.hash !== hash
-    let lastChanged = isChanged ? nowSeconds() : Number(meta.lastChanged) || 0
-    let changeCount = Number(meta.changeCount || '0')
-
-    if (!isChanged) {
-      if (dataTTL >= maxTTL) {
-        dataTTL = maxTTL
-      } else {
-        const decayFactor = 1.0 - Math.min(0.9, changeCount * 0.01)
-        const increaseFactor = Math.max(0, ttlScaling - 1)
-        const increase = Math.ceil(Math.floor(dataTTL * increaseFactor) * decayFactor)
-        dataTTL = Math.max(initialTTL, Math.min(dataTTL + increase, maxTTL))
-      }
-    } else {
-      changeCount += 1
-      dataTTL = initialTTL
-      lastChanged = nowSeconds()
-    }
-
+    const calculated = calculateNextMetadata(meta, hash, initialTTL, maxTTL, ttlScaling, Date.now())
+    let { dataTTL } = calculated
+    const { lastChanged, changeCount, changed: isChanged } = calculated
     this.stores.hashes.set(metaKey, {
       hash,
       dataTTL: String(dataTTL),
       lastChanged: String(lastChanged),
       changeCount: String(changeCount),
     })
-    await this.set(dataKey, data, 'EX', dataTTL)
+    dataTTL = Math.min(dataTTL, maxTTL)
+    const freshTTL = dataTTL * Number(jitterFactor)
+    this.stores.hashes.set(dataKey + ':state', {
+      prefix,
+      tags: tagsJSON,
+      generation,
+      freshUntil: String(Date.now() + freshTTL * 1000),
+    })
+    await this.set(
+      dataKey,
+      '@ac-redis:1:' +
+        JSON.stringify({
+          data,
+          prefix,
+          namespace: generation,
+          freshUntil: Date.now() + freshTTL * 1000,
+          epochs,
+          tags: JSON.parse(tagsJSON),
+        }),
+      'PX',
+      (freshTTL + Number(staleTTLString)) * 1000,
+    )
     await this.set(metaKey + ':ttl-marker', '1', 'EX', Number(metaTTLString))
 
     return ['CACHED', dataTTL, lastChanged, changeCount, hash, isChanged ? 1 : 0]
+  }
+
+  async adaptiveCacheInvalidate(
+    legacyKey: string,
+    operation: string,
+    prefix: string,
+    key: string,
+    tagsJSON: string,
+    barrierUUID = randomUUID(),
+    namespaceUUID = randomUUID(),
+  ) {
+    const barrier = prefix ? prefix + '__adaptive:barrier' : legacyKey
+    await this.set(barrier, barrierUUID)
+    if (operation === 'namespace') {
+      const namespace = prefix + '__adaptive:namespace'
+      await this.set(namespace, namespaceUUID)
+      return []
+    }
+    const keys = new Set<string>(operation === 'clear' ? [key] : [])
+    const tags: string[] = JSON.parse(tagsJSON)
+    for (const tag of tags) await this.del(prefix + '__adaptive:tag-epoch:' + tag)
+    for (const tag of tags) for (const member of await this.smembers(prefix + 'tag:' + tag)) keys.add(member)
+    for (const member of keys) {
+      let state = this.stores.hashes.get(member + 'data:state')
+      const data = await this.get(member + 'data')
+      if (!state && data?.startsWith('@ac-redis:1:')) {
+        const envelope = JSON.parse(data.slice('@ac-redis:1:'.length))
+        state = { prefix: envelope.prefix, tags: JSON.stringify(envelope.tags) }
+      }
+      for (const tag of JSON.parse(state?.tags || '[]'))
+        this.stores.sets.get((state?.prefix || '') + 'tag:' + tag)?.delete(member)
+      await this.del(member + 'data', member + 'meta', member + 'data:state')
+    }
+    for (const tag of tags) await this.del(prefix + 'tag:' + tag)
+    return [...keys]
   }
 
   async shouldRefreshCache(
@@ -246,10 +361,16 @@ export class FakeRedis {
     return ['UPDATE', lockValue, lastUpdate]
   }
 
-  async releaseCacheRefreshLock(lastUpdateKey: string, lockKey: string, currentTime: number, lockValue: string) {
+  async releaseCacheRefreshLock(
+    lastUpdateKey: string,
+    lockKey: string,
+    currentTime: number,
+    lockValue: string,
+    recordRefresh = 1,
+  ) {
     const existingLock = await this.get(lockKey)
     if (!existingLock || existingLock === lockValue) {
-      await this.set(lastUpdateKey, String(currentTime))
+      if (recordRefresh !== 0) await this.set(lastUpdateKey, String(currentTime))
       await this.del(lockKey)
       return ['UPDATED']
     }

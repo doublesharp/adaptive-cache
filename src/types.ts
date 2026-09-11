@@ -61,6 +61,7 @@ declare module 'ioredis' {
       lockKey: string,
       currentTime: number,
       lockValue: string,
+      recordRefresh?: number,
     ): Promise<UpdateCacheAndReleaseLockUPDATED | UpdateCacheAndReleaseLockLOCK_MISMATCH>
   }
 }
@@ -79,6 +80,9 @@ export interface AdaptiveCacheFetchResult {
   encodedData: string
   ttl: number
   metadata?: AdaptiveCacheMetadata
+  stale?: boolean
+  staleAge?: number
+  layer?: AdaptiveCacheLayer
 }
 
 export type AdaptiveCacheUpdateResult = [
@@ -90,9 +94,60 @@ export type AdaptiveCacheUpdateResult = [
   changed?: number | false,
 ]
 
-export interface AdaptiveCacheBackendSetOptions {
+export interface AdaptiveCacheSetOptions {
   maxTTL?: number
   tags?: string[]
+  staleTTL?: number
+  writeToken?: string
+  ttlJitter?: number
+}
+
+export type AdaptiveCacheBackendSetOptions = AdaptiveCacheSetOptions
+
+export interface AdaptiveCacheHit<T = any> {
+  data: T
+  ttl: number
+  metadata?: AdaptiveCacheMetadata
+  stale?: boolean
+  staleAge?: number
+  layer?: AdaptiveCacheLayer
+}
+
+export interface AdaptiveCacheLoadOptions<T = any> extends Omit<AdaptiveCacheSetOptions, 'maxTTL'> {
+  maxTTL?: number | ((data: T) => number | undefined)
+  staleWhileRevalidate?: number
+  staleIfError?: number
+  negativeTTL?: number
+  isNegative?: (data: T) => boolean
+  shouldStore?: (data: T) => boolean
+  forceRefresh?: boolean
+  lockWaitTimeoutMs?: number
+}
+
+export type AdaptiveCacheLayer = 'l1' | 'redis' | 'lru'
+export type AdaptiveCacheEventType =
+  'hit' | 'miss' | 'stale' | 'refresh' | 'write' | 'invalidate' | 'lock-contention' | 'error' | 'eviction'
+export interface AdaptiveCacheEvent {
+  type: AdaptiveCacheEventType
+  timestamp: number
+  key?: string
+  backend?: AdaptiveCacheBackendName | 'custom'
+  layer?: AdaptiveCacheLayer
+  durationMs?: number
+  ttl?: number
+  reason?: string
+  error?: unknown
+  count?: number
+}
+export interface AdaptiveCacheStats {
+  counters: Record<AdaptiveCacheEventType, number>
+  hitsByLayer: Record<AdaptiveCacheLayer, number>
+}
+export interface AdaptiveCacheCompressionOptions {
+  minBytes?: number
+  async?: boolean
+  skipCompressed?: boolean
+  onlyIfSmaller?: boolean
 }
 
 export interface AdaptiveCacheBackendFetchInput {
@@ -101,6 +156,7 @@ export interface AdaptiveCacheBackendFetchInput {
   metaKey: string
   redisPrefix: string
   includeDebugHeaders: boolean
+  allowStale?: boolean
 }
 
 export interface AdaptiveCacheBackendUpdateInput {
@@ -115,13 +171,22 @@ export interface AdaptiveCacheBackendUpdateInput {
   ttlScaling: number
   metaTTL: number
   tags: string[]
+  writeToken?: string
+  staleTTL?: number
+  ttlJitter?: number
+  lockKey?: string
+  lockValue?: string
+  allowOptimistic?: boolean
 }
 
 export interface AdaptiveCacheBackend {
   readonly name: AdaptiveCacheBackendName | 'custom'
+  captureWriteToken?(redisPrefix: string): Promise<string>
+  invalidateNamespace?(redisPrefix: string): Promise<void>
+  onEvent?(listener: (event: AdaptiveCacheEvent) => void): () => void
   fetch(input: AdaptiveCacheBackendFetchInput): Promise<AdaptiveCacheFetchResult | null>
   update(input: AdaptiveCacheBackendUpdateInput): Promise<AdaptiveCacheUpdateResult>
-  clear(key: string, dataKey: string, metaKey: string): Promise<void>
+  clear(key: string, dataKey: string, metaKey: string, redisPrefix?: string): Promise<void>
   invalidateTags(tags: string[], redisPrefix: string): Promise<string[]>
   shouldRefresh(
     lastUpdateKey: string,
@@ -135,9 +200,10 @@ export interface AdaptiveCacheBackend {
     lastUpdateKey: string,
     currentTime: number,
     lockValue: string,
+    recordRefresh?: boolean,
   ): Promise<UpdateCacheAndReleaseLockUPDATED | UpdateCacheAndReleaseLockLOCK_MISMATCH>
   flush?(): Promise<unknown>
-  quit?(): Promise<unknown>
+  quit?(preserveSharedCache?: boolean): Promise<unknown>
 }
 
 export interface AdaptiveCacheLruLocalL1Options {
@@ -181,6 +247,15 @@ export interface AdaptiveCacheOptions {
   forceRefresh?: boolean // Force refresh the cache but maintain TTL
   lockExpirationSeconds?: number // Lock expiration in seconds for shouldRefreshCache (default 60)
   metaTTL?: number // Fixed TTL for metadata storage (in seconds)
+  compression?: AdaptiveCacheCompressionOptions
+  fingerprint?: (data: any) => string | Buffer
+  ignoreFields?: string[]
+  ttlJitter?: number
+  staleWhileRevalidate?: number
+  staleIfError?: number
+  negativeTTL?: number
+  lockWaitTimeoutMs?: number
+  onEvent?: (event: AdaptiveCacheEvent) => void
   compress?: boolean // Compress the cached data, default: true
   logLevel?: 'debug' | 'info' | 'warn' | 'error' | 'silent' // Logging level
   backend?: AdaptiveCacheBackendName | AdaptiveCacheBackend

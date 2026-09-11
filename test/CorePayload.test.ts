@@ -1,0 +1,196 @@
+import crypto from 'node:crypto'
+import zlib from 'node:zlib'
+import { describe, expect, it } from 'vitest'
+import { ClusteredLruAdaptiveCacheBackend } from '../src/backends/ClusteredLruAdaptiveCacheBackend'
+import { Logger } from '../src/lib/logger'
+import { registerCoreCacheFixture } from './helpers/coreCache'
+
+const { create } = registerCoreCacheFixture()
+
+describe('core payload and typed APIs', () => {
+  it('round trips selective async compression across differently configured readers', async () => {
+    const backend = new ClusteredLruAdaptiveCacheBackend({ namespace: crypto.randomUUID() }, new Logger('silent'))
+    const writer = create({
+      backend,
+      compression: { minBytes: 100, async: true, onlyIfSmaller: true, skipCompressed: true },
+    })
+    const reader = create({ backend, compress: false })
+    const values = [
+      'short',
+      'repeat'.repeat(10000),
+      crypto.randomBytes(1024),
+      zlib.gzipSync('compressed'),
+      undefined,
+      { answer: 42 },
+    ]
+    for (const [i, data] of values.entries()) {
+      await writer.set(String(i), data)
+      expect((await reader.get(String(i)))?.data).toEqual(data)
+    }
+  })
+
+  it('ignores nested fingerprint fields without dropping them from the stored payload', async () => {
+    const cache = create({ ignoreFields: ['request.id', 'updatedAt'], includeDebugHeaders: true, compress: false })
+    await cache.set('fingerprint', { stable: 1, request: { id: 'a', path: '/' }, updatedAt: 1 })
+    await cache.set('fingerprint', { stable: 1, request: { id: 'b', path: '/' }, updatedAt: 2 })
+    const hit = await cache.get('fingerprint')
+    expect(hit?.metadata?.dataTTL).toBe(4)
+    expect(hit?.data).toEqual({ stable: 1, request: { id: 'b', path: '/' }, updatedAt: 2 })
+  })
+
+  it('bulk operations and observer failures preserve cache behavior and count real outcomes', async () => {
+    const cache = create({
+      onEvent: () => {
+        throw new Error('observer')
+      },
+    })
+    const events: string[] = []
+    const unsubscribe = cache.onEvent((event) => {
+      events.push(event.type)
+    })
+    await cache.setMany([
+      { key: 'a', data: 1 },
+      { key: 'b', data: 2 },
+    ])
+    const hits = await cache.getMany<number>(['b', 'missing', 'a'])
+    expect([...hits.keys()]).toEqual(['b', 'missing', 'a'])
+    expect(hits.get('a')?.data).toBe(1)
+    expect(hits.get('missing')).toBeNull()
+    expect(cache.getStats().counters).toMatchObject({ hit: 2, miss: 1, write: 2 })
+    expect(cache.getStats().hitsByLayer.lru).toBe(2)
+    unsubscribe()
+    await cache.clearMany(['a', 'b'])
+    expect((await cache.getMany(['a', 'b'])).get('b')).toBeNull()
+    expect(events.sort()).toEqual(['hit', 'hit', 'miss', 'write', 'write'])
+    await cache.close()
+    await expect(cache.set('closed', 1)).rejects.toThrow('closed')
+  })
+
+  it.each([{ initialTTL: 0 }, { ttlJitter: 2 }, { staleIfError: -1 }, { compression: { minBytes: NaN } }])(
+    'rejects invalid options %o',
+    (options) => {
+      expect(() => create(options)).toThrow()
+    },
+  )
+})
+
+describe('codec compatibility', () => {
+  it('reads legacy raw JSON, strings, buffers, and gzip payloads', async () => {
+    const backend = new ClusteredLruAdaptiveCacheBackend({ namespace: crypto.randomUUID() }, new Logger('silent'))
+    const plain = create({ backend, compress: false }),
+      compressed = create({ backend })
+    const fixtures: Array<[string, unknown, boolean]> = [
+      ['{"legacy":true}', { legacy: true }, false],
+      ['raw text', 'raw text', false],
+      ['{"__adaptiveCachePayload":1,"type":"buffer","value":"AQID"}', Buffer.from([1, 2, 3]), false],
+      [zlib.gzipSync('{"old":"gzip"}').toString('base64'), { old: 'gzip' }, true],
+    ]
+    for (const [i, [encodedData, expected, isGzip]] of fixtures.entries()) {
+      await backend.update({
+        key: String(i),
+        dataKey: i + 'data',
+        metaKey: i + 'meta',
+        redisPrefix: 'adaptive:',
+        encodedData,
+        responseHash: String(i),
+        initialTTL: 20,
+        maxTTL: 20,
+        ttlScaling: 2,
+        metaTTL: 30,
+        tags: [],
+      })
+      expect((await (isGzip ? compressed : plain).get(String(i)))?.data).toEqual(expected)
+    }
+  })
+
+  it('custom fingerprints grow TTL while retaining the most recent payload', async () => {
+    const cache = create({ fingerprint: (data) => Buffer.from(data.identity), includeDebugHeaders: true })
+    await cache.set('custom', { identity: 'same', volatile: 1 })
+    await cache.set('custom', { identity: 'same', volatile: 2 })
+    expect((await cache.get('custom'))?.metadata?.dataTTL).toBe(4)
+    expect((await cache.get('custom'))?.data.volatile).toBe(2)
+  })
+
+  it('selective compression avoids growth and known compressed binary formats', async () => {
+    const backend = new ClusteredLruAdaptiveCacheBackend({ namespace: crypto.randomUUID() }, new Logger('silent'))
+    const cache = create({ backend, compression: { onlyIfSmaller: true, skipCompressed: true } })
+    const inputs: Array<[string, unknown, string]> = [
+      ['tiny', '', 'json:'],
+      ['repeat', 'abc'.repeat(1000), 'gzip:'],
+      ['gzip', zlib.gzipSync('abc'.repeat(1000)), 'json:'],
+    ]
+    for (const [key, data, codec] of inputs) {
+      await cache.set(key, data)
+      const stored = await backend.fetch({
+        key,
+        dataKey: key + 'data',
+        metaKey: key + 'meta',
+        redisPrefix: 'adaptive:',
+        includeDebugHeaders: false,
+      })
+      expect(stored?.encodedData).toMatch('adaptive-cache:v2:' + codec)
+      expect((await cache.get(key))?.data).toEqual(data)
+    }
+  })
+})
+
+describe('codec policy edge cases', () => {
+  it('decodes compressed text asynchronously and respects compress=false with a compression policy', async () => {
+    const cache = create({ compression: { async: true } })
+    const data = 'asynchronous decompression '.repeat(1000)
+    await cache.set('async-read', data)
+    expect((await cache.get('async-read'))?.data).toBe(data)
+    const disabled = create({ compress: false, compression: { minBytes: 0 } })
+    await disabled.set('disabled', data)
+    expect((await disabled.get('disabled'))?.data).toBe(data)
+  })
+
+  it('ignores absent, primitive, and inherited paths safely without mutating user data', async () => {
+    const cache = create({
+      ignoreFields: ['missing.id', 'nullable.id', 'text.id', 'constructor.prototype.polluted', 'ignored'],
+      includeDebugHeaders: true,
+    })
+    const first = { nullable: null, text: 'value', ignored: { id: 1 }, keep: 'present' }
+    await cache.set('safe-fields', first)
+    await cache.set('safe-fields', { ...first, ignored: { id: 2 } })
+    expect((await cache.get('safe-fields'))?.metadata?.dataTTL).toBe(4)
+    expect(first.ignored).toEqual({ id: 1 })
+    expect((await cache.get('safe-fields'))?.data.ignored).toEqual({ id: 2 })
+  })
+
+  it('skips redundant gzip for compressed images and ZIP data even when compression is forced for other buffers', async () => {
+    const backend = new ClusteredLruAdaptiveCacheBackend({ namespace: crypto.randomUUID() }, new Logger('silent'))
+    const cache = create({ backend, compression: { skipCompressed: true, onlyIfSmaller: false } })
+    const png = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a7xsAAAAASUVORK5CYII=',
+      'base64',
+    )
+    const zip = Buffer.from('504b0506000000000000000000000000000000000000', 'hex')
+    // Valid 1x1 red images generated with Pillow.
+    const jpeg = Buffer.from(
+      '/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAABAAEDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDi6KKK+ZP3E//Z',
+      'base64',
+    )
+    const webp = Buffer.from(
+      'UklGRjwAAABXRUJQVlA4IDAAAADQAQCdASoBAAEAAUAmJaACdLoB+AADsAD+8ut//NgVzXPv9//S4P0uD9Lg/9KQAAA=',
+      'base64',
+    )
+    for (const [key, data] of [
+      ['png', png],
+      ['zip', zip],
+      ['jpeg', jpeg],
+      ['webp', webp],
+    ] as const) {
+      await cache.set(key, data)
+      const stored = await backend.fetch({
+        key,
+        dataKey: key + 'data',
+        metaKey: key + 'meta',
+        redisPrefix: 'adaptive:',
+        includeDebugHeaders: false,
+      })
+      expect(stored?.encodedData).toMatch(/^adaptive-cache:v2:json:/)
+      expect((await cache.get(key))?.data).toEqual(data)
+    }
+  })
+})

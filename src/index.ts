@@ -19,6 +19,20 @@ export {
   AdaptiveCacheLruOptions,
   AdaptiveCache,
 }
+export type {
+  AdaptiveCacheHit,
+  AdaptiveCacheSetOptions,
+  AdaptiveCacheLoadOptions,
+  AdaptiveCacheEvent,
+  AdaptiveCacheEventType,
+  AdaptiveCacheStats,
+  AdaptiveCacheLayer,
+  AdaptiveCacheCompressionOptions,
+  AdaptiveCacheFetchResult,
+  AdaptiveCacheBackendFetchInput,
+  AdaptiveCacheBackendUpdateInput,
+  AdaptiveCacheUpdateResult,
+} from './types'
 export { getDefaultCache, redis }
 export { adaptiveExpressCache, clearAdaptiveCache, adaptiveFastifyCache, cache }
 

@@ -1,74 +1,44 @@
 import Redis from 'ioredis'
 import crypto from 'node:crypto'
-import zlib from 'node:zlib'
+import { performance } from 'node:perf_hooks'
+import { encode, decode, fingerprint } from './payload'
 import { Logger } from './lib/logger'
+import { CacheLoader } from './CacheLoader'
 import { ClusteredLruAdaptiveCacheBackend } from './backends/ClusteredLruAdaptiveCacheBackend'
 import { L1RedisAdaptiveCacheBackend } from './backends/L1RedisAdaptiveCacheBackend'
 import { RedisAdaptiveCacheBackend } from './backends/RedisAdaptiveCacheBackend'
-import { AdaptiveCacheBackend, AdaptiveCacheOptions } from './types'
+import {
+  AdaptiveCacheBackend,
+  AdaptiveCacheOptions,
+  AdaptiveCacheSetOptions,
+  AdaptiveCacheHit,
+  AdaptiveCacheLoadOptions,
+  AdaptiveCacheStats,
+  AdaptiveCacheEvent,
+} from './types'
 
-const DEFAULT_MAX_TTL = 60 * 15 // 15 minutes
-const PAYLOAD_ENVELOPE_VERSION = 1
+const DEFAULT_MAX_TTL = 60 * 15
 
-interface PayloadEnvelope {
-  __adaptiveCachePayload: typeof PAYLOAD_ENVELOPE_VERSION
-  type: 'json' | 'string' | 'buffer' | 'undefined'
-  value?: any
+const validateNumber = (name: string, value: number | undefined, min = 0, inclusive = true) => {
+  if (value !== undefined && (!Number.isFinite(value) || (inclusive ? value < min : value <= min))) {
+    throw new RangeError(`${name} must be a finite number ${inclusive ? 'at least' : 'greater than'} ${min}`)
+  }
 }
 
-const isPayloadEnvelope = (value: any): value is PayloadEnvelope =>
-  value && typeof value === 'object' && value.__adaptiveCachePayload === PAYLOAD_ENVELOPE_VERSION
-
-const encodePayload = (data: any) => {
-  let envelope: PayloadEnvelope
-
-  if (Buffer.isBuffer(data)) {
-    envelope = {
-      __adaptiveCachePayload: PAYLOAD_ENVELOPE_VERSION,
-      type: 'buffer',
-      value: data.toString('base64'),
-    }
-  } else if (typeof data === 'string') {
-    envelope = {
-      __adaptiveCachePayload: PAYLOAD_ENVELOPE_VERSION,
-      type: 'string',
-      value: data,
-    }
-  } else if (typeof data === 'undefined') {
-    envelope = {
-      __adaptiveCachePayload: PAYLOAD_ENVELOPE_VERSION,
-      type: 'undefined',
-    }
-  } else {
-    envelope = {
-      __adaptiveCachePayload: PAYLOAD_ENVELOPE_VERSION,
-      type: 'json',
-      value: data,
-    }
+const validateSettings = (options: AdaptiveCacheOptions | AdaptiveCacheLoadOptions) => {
+  for (const name of [
+    'staleWhileRevalidate',
+    'staleIfError',
+    'negativeTTL',
+    'lockWaitTimeoutMs',
+    'ttlJitter',
+    'staleTTL',
+  ] as const) {
+    validateNumber(name, (options as AdaptiveCacheLoadOptions)[name])
   }
-
-  return JSON.stringify(envelope)
-}
-
-const decodePayload = (rawData: string) => {
-  let parsed: any
-  try {
-    parsed = JSON.parse(rawData)
-  } catch {
-    return rawData
-  }
-
-  if (!isPayloadEnvelope(parsed)) return parsed
-
-  if (parsed.type === 'buffer') {
-    return Buffer.from(String(parsed.value || ''), 'base64')
-  }
-
-  if (parsed.type === 'undefined') {
-    return undefined
-  }
-
-  return parsed.value
+  if (options.ttlJitter !== undefined && options.ttlJitter > 1)
+    throw new RangeError('ttlJitter must be between 0 and 1')
+  if (typeof options.maxTTL === 'number') validateNumber('maxTTL', options.maxTTL, 0, false)
 }
 
 export class AdaptiveCache {
@@ -82,11 +52,50 @@ export class AdaptiveCache {
   private options: AdaptiveCacheOptions
   private backend: AdaptiveCacheBackend
   private redisClient?: Redis
+  private readonly loader: CacheLoader
+  private readonly pending = new Set<Promise<unknown>>()
+  private readonly listeners = new Set<(event: AdaptiveCacheEvent) => void>()
+  private readonly stats: AdaptiveCacheStats = {
+    counters: {
+      hit: 0,
+      miss: 0,
+      stale: 0,
+      refresh: 0,
+      write: 0,
+      invalidate: 0,
+      'lock-contention': 0,
+      error: 0,
+      eviction: 0,
+    },
+    hitsByLayer: { l1: 0, redis: 0, lru: 0 },
+  }
+  private closing = false
+  private closePromise?: Promise<unknown>
+  private unsubscribeBackend?: () => void
 
   constructor(options: AdaptiveCacheOptions = {}, client?: Redis) {
+    validateSettings(options)
+    for (const name of ['initialTTL', 'ttlScaling', 'metaTTL', 'lockExpirationSeconds'] as const)
+      validateNumber(name, options[name], 0, false)
+    if (options.metaTTL !== undefined && !Number.isInteger(options.metaTTL))
+      throw new RangeError('metaTTL must be a positive integer number of seconds')
+    validateNumber('compression.minBytes', options.compression?.minBytes)
     this.options = options
     this.logger = new Logger(options.logLevel || 'info')
     this.backend = this.createBackend(options, client)
+    this.loader = new CacheLoader({
+      options: this.options,
+      backend: this.backend,
+      getKeyPrefix: this.getKeyPrefix.bind(this),
+      read: this.read.bind(this),
+      write: this.write.bind(this),
+      resolveMaxTTL: this.resolveMaxTTL.bind(this),
+      acquireRefreshLock: this.acquireRefreshLock.bind(this),
+      track: this.track.bind(this),
+      emit: this.emit.bind(this),
+    })
+    if (options.onEvent) this.listeners.add(options.onEvent)
+    this.unsubscribeBackend = this.backend.onEvent?.((event) => this.emit(event))
   }
 
   public get client(): Redis {
@@ -129,104 +138,222 @@ export class AdaptiveCache {
     return this.options.keyPrefix || this.options.redisPrefix || 'adaptive:'
   }
 
-  public async get(key: string) {
-    const dataKey = key + 'data'
-    const metaKey = key + 'meta'
-    const { compress = true, includeDebugHeaders = false } = this.options
-
-    const result = await this.backend.fetch({
-      key,
-      dataKey,
-      metaKey,
-      redisPrefix: this.getKeyPrefix(),
-      includeDebugHeaders,
-    })
-
-    if (!result) {
-      return null
-    }
-
-    let cacheResult: any = {
-      ttl: result.ttl,
-      data: null,
-    }
-
-    try {
-      const rawData = compress
-        ? zlib.gunzipSync(Buffer.from(result.encodedData, 'base64')).toString('utf-8')
-        : result.encodedData
-      cacheResult.data = decodePayload(rawData)
-    } catch (err) {
-      this.logger.warn('adaptiveCache failed to fetch data:', err)
-      throw err
-    }
-
-    if (includeDebugHeaders && result.metadata) {
-      cacheResult.metadata = {
-        dataTTL: result.metadata.dataTTL,
-        lastChanged: result.metadata.lastChanged,
-        changeCount: result.metadata.changeCount,
-      }
-    }
-
-    return cacheResult
+  private assertOpen() {
+    if (this.closing) throw new Error('AdaptiveCache is closed')
   }
 
-  public async set(key: string, data: any, options: { maxTTL?: number; tags?: string[] } = {}) {
-    const dataKey = key + 'data'
-    const metaKey = key + 'meta'
-
-    const { initialTTL = 5, ttlScaling = 2, metaTTL = 60 * 60 * 24 * 7, compress = true } = this.options
-
-    let maxTTL = DEFAULT_MAX_TTL
-    if (typeof options.maxTTL === 'number') {
-      maxTTL = options.maxTTL
-    } else if (typeof this.options.maxTTL === 'number') {
-      maxTTL = this.options.maxTTL
-    } else if (typeof this.options.maxTTL === 'function') {
-      const calculatedTTL = this.options.maxTTL(data)
-      maxTTL =
-        typeof calculatedTTL === 'number' && Number.isFinite(calculatedTTL) && calculatedTTL > 0
-          ? calculatedTTL
-          : DEFAULT_MAX_TTL
+  private emit(event: Omit<AdaptiveCacheEvent, 'timestamp'> & { timestamp?: number }) {
+    const complete: AdaptiveCacheEvent = { timestamp: Date.now(), backend: this.backend.name, ...event }
+    this.stats.counters[complete.type] += complete.count ?? 1
+    if (complete.type === 'hit' && complete.layer) this.stats.hitsByLayer[complete.layer]++
+    for (const listener of this.listeners) {
+      try {
+        void Promise.resolve(listener(complete)).catch(() => {
+          /* Async observers are isolated too. */
+        })
+      } catch {
+        /* Observers cannot affect cache operations. */
+      }
     }
+  }
 
-    const responseData = encodePayload(data)
-    const responseHash = crypto.createHash('sha256').update(responseData).digest('hex')
+  public onEvent(listener: (event: AdaptiveCacheEvent) => void): () => void {
+    this.listeners.add(listener)
+    return () => {
+      this.listeners.delete(listener)
+    }
+  }
 
-    const cacheData = compress ? zlib.gzipSync(Buffer.from(responseData)).toString('base64') : responseData
+  public getStats(): AdaptiveCacheStats {
+    return { counters: { ...this.stats.counters }, hitsByLayer: { ...this.stats.hitsByLayer } }
+  }
 
+  private track<T>(promise: Promise<T>): Promise<T> {
+    this.pending.add(promise)
+    void promise.then(
+      () => this.pending.delete(promise),
+      () => this.pending.delete(promise),
+    )
+    return promise
+  }
+
+  public async get<T = any>(key: string, options: { allowStale?: boolean } = {}): Promise<AdaptiveCacheHit<T> | null> {
+    this.assertOpen()
+    return this.track(this.read<T>(key, options))
+  }
+
+  private async read<T>(key: string, options: { allowStale?: boolean } = {}): Promise<AdaptiveCacheHit<T> | null> {
+    const started = performance.now()
     try {
+      const result = await this.backend.fetch({
+        key,
+        dataKey: key + 'data',
+        metaKey: key + 'meta',
+        redisPrefix: this.getKeyPrefix(),
+        includeDebugHeaders: this.options.includeDebugHeaders ?? false,
+        allowStale: options.allowStale,
+      })
+      if (!result) {
+        this.emit({ type: 'miss', key, durationMs: performance.now() - started })
+        return null
+      }
+      const hit: AdaptiveCacheHit<T> = { ttl: result.ttl, data: await decode(result.encodedData, this.options) }
+      if (result.stale) {
+        hit.stale = true
+        hit.staleAge = result.staleAge
+      }
+      // Keep the historical enumerable hit shape while exposing layer attribution.
+      if (result.layer) Object.defineProperty(hit, 'layer', { value: result.layer, enumerable: false })
+      if (this.options.includeDebugHeaders && result.metadata) {
+        hit.metadata = {
+          dataTTL: result.metadata.dataTTL,
+          lastChanged: result.metadata.lastChanged,
+          changeCount: result.metadata.changeCount,
+        }
+      }
+      this.emit({
+        type: result.stale ? 'stale' : 'hit',
+        key,
+        layer: result.layer,
+        ttl: result.ttl,
+        durationMs: performance.now() - started,
+      })
+      return hit
+    } catch (error) {
+      this.logger.warn('adaptiveCache failed to fetch data:', error)
+      this.emit({ type: 'error', key, reason: 'read', error, durationMs: performance.now() - started })
+      throw error
+    }
+  }
+
+  public supportsWriteFencing(): boolean {
+    return typeof this.backend.captureWriteToken === 'function'
+  }
+
+  public async captureWriteToken(): Promise<string> {
+    this.assertOpen()
+    if (!this.backend.captureWriteToken)
+      throw new Error('Backend does not support captureWriteToken required for fenced loading')
+    return this.track(this.backend.captureWriteToken(this.getKeyPrefix()))
+  }
+
+  public async set(key: string, data: any, options: AdaptiveCacheSetOptions = {}) {
+    this.assertOpen()
+    return this.track(this.write(key, data, options))
+  }
+
+  public resolveMaxTTL(data: any, options: Pick<AdaptiveCacheOptions, 'maxTTL'> = {}): number {
+    const requested = typeof options.maxTTL === 'function' ? options.maxTTL(data) : options.maxTTL
+    if (typeof requested === 'number' && Number.isFinite(requested) && requested > 0) return requested
+    if (typeof this.options.maxTTL === 'number') return this.options.maxTTL
+    if (typeof this.options.maxTTL === 'function') {
+      const calculated = this.options.maxTTL(data)
+      if (typeof calculated === 'number' && Number.isFinite(calculated) && calculated > 0) return calculated
+    }
+    return DEFAULT_MAX_TTL
+  }
+
+  private async write(
+    key: string,
+    data: any,
+    options: AdaptiveCacheSetOptions = {},
+    lease?: { lockKey: string; lockValue: string },
+  ) {
+    validateSettings(options)
+    const started = performance.now()
+    try {
+      const { initialTTL = 5, ttlScaling = 2, metaTTL = 60 * 60 * 24 * 7 } = this.options
+      const maxTTL = this.resolveMaxTTL(data, options)
+      const writeToken = options.writeToken ?? (await this.backend.captureWriteToken?.(this.getKeyPrefix()))
+      if (this.options.compression?.async && writeToken === undefined)
+        throw new Error('Backend does not support captureWriteToken required for asynchronous encoding')
+      const responseHash = fingerprint(data, this.options)
+      const encodedData = await encode(data, this.options)
       const result = await this.backend.update({
         key,
-        dataKey,
-        metaKey,
+        dataKey: key + 'data',
+        metaKey: key + 'meta',
         redisPrefix: this.getKeyPrefix(),
-        encodedData: cacheData,
+        encodedData,
         responseHash,
-        initialTTL,
+        initialTTL: Math.min(initialTTL, maxTTL),
         maxTTL,
         ttlScaling,
         metaTTL,
         tags: options.tags || [],
+        writeToken,
+        staleTTL: options.staleTTL ?? Math.max(this.options.staleWhileRevalidate ?? 0, this.options.staleIfError ?? 0),
+        ttlJitter: options.ttlJitter ?? this.options.ttlJitter,
+        ...lease,
+        allowOptimistic: options.writeToken === undefined && !lease && !this.options.compression?.async,
       })
-
-      this.logger.debug('adaptiveCache:', this.backend.name, metaKey, result)
+      this.logger.debug('adaptiveCache:', this.backend.name, key + 'meta', result)
+      if (result[0] === 'INVALIDATED') {
+        this.emit({ type: 'invalidate', key, reason: 'write-rejected', durationMs: performance.now() - started })
+      } else {
+        this.emit({ type: 'write', key, ttl: result[1], durationMs: performance.now() - started })
+      }
       return result
-    } catch (err) {
-      this.logger.error('Cache operation failed:', err)
-      throw err
+    } catch (error) {
+      this.logger.error('Cache operation failed:', error)
+      this.emit({ type: 'error', key, reason: 'write', error, durationMs: performance.now() - started })
+      throw error
     }
   }
 
+  public async getOrSet<T>(
+    key: string,
+    loader: () => Promise<T>,
+    options: AdaptiveCacheLoadOptions<T> = {},
+  ): Promise<T> {
+    this.assertOpen()
+    validateSettings(options)
+    return this.track(this.loader.getOrSet(key, loader, options))
+  }
+
+  public async getMany<T = any>(keys: string[]): Promise<Map<string, AdaptiveCacheHit<T> | null>> {
+    return new Map(await Promise.all(keys.map(async (key) => [key, await this.get<T>(key)] as const)))
+  }
+
+  public async setMany(
+    entries: Array<{ key: string; data: unknown; options?: AdaptiveCacheSetOptions }>,
+  ): Promise<void> {
+    await Promise.all(entries.map(({ key, data, options }) => this.set(key, data, options)))
+  }
+
+  public async clearMany(keys: string[]): Promise<void> {
+    await Promise.all(keys.map((key) => this.clear(key)))
+  }
+
+  public async invalidateNamespace(): Promise<void> {
+    this.assertOpen()
+    if (!this.backend.invalidateNamespace) throw new Error('Backend does not support namespace invalidation')
+    return this.track(
+      (async () => {
+        await this.backend.invalidateNamespace!(this.getKeyPrefix())
+        this.emit({ type: 'invalidate', reason: 'namespace' })
+      })(),
+    )
+  }
+
   public async invalidateTags(tags: string[]) {
-    await this.backend.invalidateTags(tags, this.getKeyPrefix())
+    this.assertOpen()
+    return this.track(
+      (async () => {
+        await this.backend.invalidateTags(tags, this.getKeyPrefix())
+        this.emit({ type: 'invalidate', reason: 'tags' })
+      })(),
+    )
   }
 
   public async clear(key: string) {
-    const dataKey = key + 'data'
-    const metaKey = key + 'meta'
-    await this.backend.clear(key, dataKey, metaKey)
+    this.assertOpen()
+    return this.track(
+      (async () => {
+        await this.backend.clear(key, key + 'data', key + 'meta', this.getKeyPrefix())
+        this.emit({ type: 'invalidate', key, reason: 'clear' })
+      })(),
+    )
   }
 
   public async shouldRefresh(
@@ -235,12 +362,23 @@ export class AdaptiveCache {
     force = false,
     lockExpirationSeconds?: number,
   ) {
+    this.assertOpen()
+    return this.track(this.acquireRefreshLock(lastUpdateKey, refreshThreshold, force, lockExpirationSeconds))
+  }
+
+  // Accepted loaders can finish acquiring/releasing locks while close() drains them.
+  private async acquireRefreshLock(
+    lastUpdateKey: string,
+    refreshThreshold: number,
+    force: boolean,
+    lockExpirationSeconds?: number,
+  ) {
     const currentTime = Math.floor(Date.now() / 1000)
     const effectiveLockSeconds =
       typeof lockExpirationSeconds === 'number'
         ? lockExpirationSeconds
         : this.options.lockExpirationSeconds || AdaptiveCache.DEFAULT_LOCK_EXPIRATION_SECONDS
-    const lockValue = Math.random().toString(36).substring(7)
+    const lockValue = crypto.randomUUID()
     this.logger.info('shouldRefreshCache lockValue', lockValue)
 
     const result = await this.backend.shouldRefresh(
@@ -256,15 +394,29 @@ export class AdaptiveCache {
   }
 
   public async releaseLock(lastUpdateKey: string, lockValue: string) {
+    this.assertOpen()
     const currentTime = Math.floor(Date.now() / 1000)
-    return this.backend.releaseLock(lastUpdateKey, currentTime, lockValue)
+    return this.track(this.backend.releaseLock(lastUpdateKey, currentTime, lockValue))
   }
 
-  public quit() {
-    return this.backend.quit?.()
+  public quit(preserveSharedCache = false) {
+    if (!this.closePromise) {
+      this.closing = true
+      this.closePromise = (async () => {
+        await this.flush()
+        this.unsubscribeBackend?.()
+        return this.backend.quit?.(preserveSharedCache)
+      })()
+    }
+    return this.closePromise
   }
 
-  public flush() {
+  public async close(): Promise<void> {
+    await this.quit()
+  }
+
+  public async flush() {
+    while (this.pending.size > 0) await Promise.allSettled([...this.pending])
     return this.backend.flush?.()
   }
 }

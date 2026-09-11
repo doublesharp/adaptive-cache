@@ -14,6 +14,15 @@ interface InvalidationMessage {
   keys: string[]
 }
 
+interface ClientState {
+  pendingUpdates: Set<Promise<void>>
+  hydrations: Set<Promise<unknown>>
+  generation: number
+}
+
+// Middleware and temporary invalidators share the same caller-owned client.
+const clientStates = new WeakMap<Redis, ClientState>()
+
 export class L1RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
   public readonly name = 'l1-redis' as const
   public readonly client: Redis
@@ -21,9 +30,10 @@ export class L1RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
   private readonly lru: ClusteredLruAdaptiveCacheBackend
   private readonly logger: Logger
   private readonly writeMode: 'async' | 'await-redis'
-  private readonly pendingUpdates = new Set<Promise<void>>()
+  private readonly state: ClientState
   private readonly sourceId = Math.random().toString(36).slice(2)
   private readonly channel: string
+  private readonly redisPrefix: string
   private subscriber?: Redis
   private subscriberReady?: Promise<void>
 
@@ -34,8 +44,15 @@ export class L1RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
     logger: Logger,
     writeMode: 'async' | 'await-redis' = 'async',
   ) {
+    this.redisPrefix = redisPrefix
     this.redis = redis
     this.client = redis.client
+    let state = clientStates.get(this.client)
+    if (!state) {
+      state = { pendingUpdates: new Set(), hydrations: new Set(), generation: 0 }
+      clientStates.set(this.client, state)
+    }
+    this.state = state
     this.lru = lru
     this.logger = logger
     this.writeMode = writeMode
@@ -44,16 +61,23 @@ export class L1RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
   }
 
   public async fetch(input: AdaptiveCacheBackendFetchInput) {
+    const token = await this.redis.captureWriteToken(input.redisPrefix)
     const l1Result = await this.lru.fetch(input)
-    if (l1Result) return l1Result
+    if (l1Result && l1Result.writeToken === token) return { ...l1Result, layer: 'l1' as const }
+    if (l1Result) await this.lru.deleteKeys([input.key])
 
+    await this.subscriberReady
+    const generation = this.state.generation
     const redisResult = await this.redis.fetch(input)
-    if (redisResult) {
+    if (redisResult && redisResult.ttl > 0 && generation === this.state.generation) {
+      const hydration = this.lru.hydrateFromFetch(input, redisResult, token)
+      this.state.hydrations.add(hydration)
       try {
-        await this.subscriberReady
-        await this.lru.hydrateFromFetch(input, redisResult)
+        await hydration
       } catch (err) {
         this.logger.warn('Failed to hydrate clustered LRU from Redis:', err)
+      } finally {
+        this.state.hydrations.delete(hydration)
       }
     }
 
@@ -61,25 +85,39 @@ export class L1RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
   }
 
   public async update(input: AdaptiveCacheBackendUpdateInput): Promise<AdaptiveCacheUpdateResult> {
-    await this.lru.storeConservative(input)
+    const token = input.writeToken || (await this.redis.captureWriteToken(input.redisPrefix))
+    // Explicitly fenced writes cannot be visible before Redis accepts them.
+    const optimistic = this.writeMode === 'async' && (!input.writeToken || input.allowOptimistic) && !input.lockKey
+    if (optimistic) {
+      await this.lru.storeConservative({ ...input, writeToken: token })
+    }
 
-    const redisUpdate = this.redis.update(input).then<AdaptiveCacheUpdateResult>(async (result) => {
-      await this.lru.hydrateFromUpdate(input, result)
-      const changed = result[5] === 1
-      if (changed) {
-        await this.publishInvalidation([input.key])
-      }
-      return result
-    })
+    const redisUpdate = this.redis
+      .update({ ...input, writeToken: token })
+      .then<AdaptiveCacheUpdateResult>(async (result) => {
+        if (result[0] === 'INVALIDATED') return result
+        if (token !== (await this.redis.captureWriteToken(input.redisPrefix))) return ['INVALIDATED', 0]
+        // Use the remaining Redis lifetime: hydration latency and jitter must not extend freshness.
+        const current = await this.redis.fetch({ ...input, includeDebugHeaders: true })
+        if (current && current.ttl > 0 && current.encodedData === input.encodedData) {
+          await this.lru.hydrateFromFetch({ ...input, includeDebugHeaders: true }, current, token)
+        }
+        if (!current || current.ttl <= 0) await this.lru.deleteKeys([input.key])
+        const changed = result[5] === 1
+        if (changed) {
+          await this.publishInvalidation([input.key])
+        }
+        return result
+      })
 
     const trackedUpdate = redisUpdate.then(
       () => undefined,
       () => undefined,
     )
-    this.pendingUpdates.add(trackedUpdate)
-    trackedUpdate.then(() => this.pendingUpdates.delete(trackedUpdate))
+    this.state.pendingUpdates.add(trackedUpdate)
+    trackedUpdate.then(() => this.state.pendingUpdates.delete(trackedUpdate))
 
-    if (this.writeMode === 'await-redis') {
+    if (!optimistic) {
       return redisUpdate.catch((err) => {
         this.logger.error('Redis adaptive cache update failed after L1 write:', err)
         throw err
@@ -93,15 +131,37 @@ export class L1RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
     return ['CACHED', input.initialTTL, Math.floor(Date.now() / 1000), 0, input.responseHash, 1]
   }
 
-  public async clear(key: string, dataKey: string, metaKey: string) {
-    await this.lru.clear(key, dataKey, metaKey)
-    await this.redis.clear(key, dataKey, metaKey)
+  public captureWriteToken(redisPrefix: string) {
+    return this.redis.captureWriteToken(redisPrefix)
+  }
+
+  public onEvent(listener: Parameters<ClusteredLruAdaptiveCacheBackend['onEvent']>[0]) {
+    return this.lru.onEvent(listener)
+  }
+
+  public async invalidateNamespace(redisPrefix: string) {
+    this.state.generation++
+    await this.redis.invalidateNamespace(redisPrefix)
+    await this.lru.invalidateNamespace(redisPrefix)
+  }
+
+  public async clear(key: string, dataKey: string, metaKey: string, redisPrefix = this.redisPrefix) {
+    this.state.generation++
+    await this.flush()
+    await this.redis.clear(key, dataKey, metaKey, redisPrefix)
+    this.state.generation++
+    await Promise.allSettled([...this.state.hydrations])
+    await this.lru.clear(key, dataKey, metaKey, redisPrefix)
     await this.publishInvalidation([key])
   }
 
   public async invalidateTags(tags: string[], redisPrefix: string) {
-    const lruKeys = await this.lru.invalidateTags(tags, redisPrefix)
+    this.state.generation++
+    await this.flush()
     const redisKeys = await this.redis.invalidateTags(tags, redisPrefix)
+    this.state.generation++
+    await Promise.allSettled([...this.state.hydrations])
+    const lruKeys = await this.lru.invalidateTags(tags, redisPrefix)
     const keys = Array.from(new Set([...lruKeys, ...redisKeys]))
 
     if (keys.length > 0) {
@@ -130,11 +190,11 @@ export class L1RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
     )
   }
 
-  public releaseLock(lastUpdateKey: string, currentTime: number, lockValue: string) {
-    return this.redis.releaseLock(lastUpdateKey, currentTime, lockValue)
+  public releaseLock(lastUpdateKey: string, currentTime: number, lockValue: string, recordRefresh = true) {
+    return this.redis.releaseLock(lastUpdateKey, currentTime, lockValue, recordRefresh)
   }
 
-  public async quit() {
+  public async quit(preserveSharedCache = false) {
     await this.flush()
 
     if (this.subscriber) {
@@ -142,12 +202,12 @@ export class L1RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
       this.subscriber = undefined
     }
 
-    await this.lru.quit?.()
+    await this.lru.quit?.(preserveSharedCache)
     await this.redis.quit?.()
   }
 
   public async flush() {
-    await Promise.allSettled(Array.from(this.pendingUpdates))
+    await Promise.allSettled(Array.from(this.state.pendingUpdates))
   }
 
   private subscribeInvalidations() {
@@ -179,13 +239,22 @@ export class L1RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
       return
     }
 
-    if (message.source === this.sourceId || !Array.isArray(message.keys)) {
+    if (
+      !message ||
+      typeof message !== 'object' ||
+      message.source === this.sourceId ||
+      !Array.isArray(message.keys) ||
+      !message.keys.every((key) => typeof key === 'string')
+    ) {
       return
     }
 
-    this.lru.deleteKeys(message.keys).catch((err) => {
-      this.logger.warn('Failed to apply Redis L1 invalidation:', err)
-    })
+    this.state.generation++
+    Promise.allSettled([...this.state.hydrations])
+      .then(() => this.lru.deleteKeys(message.keys))
+      .catch((err) => {
+        this.logger.warn('Failed to apply Redis L1 invalidation:', err)
+      })
   }
 
   private async publishInvalidation(keys: string[]) {

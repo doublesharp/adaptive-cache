@@ -1,3 +1,4 @@
+import { getAdaptiveCacheKey } from '../src/utils'
 import { describe, it, expect, beforeAll, afterAll, vi, beforeEach } from 'vitest'
 import { GenericContainer, StartedTestContainer } from 'testcontainers'
 import express from 'express'
@@ -52,6 +53,9 @@ describe('Adaptive Express Cache', () => {
       // First call
       await request(app).get('/test').expect(200)
       expect(callCount).toBe(1)
+
+      const key = getAdaptiveCacheKey('/test', {}, 'adaptive:')
+      await vi.waitFor(async () => expect(await redisClient.exists(key + 'data')).toBe(1))
 
       // Second call (cached)
       await request(app).get('/test').expect(200)
@@ -173,7 +177,6 @@ describe('Adaptive Express Cache', () => {
     it('should handle maxTTL as a function', async () => {
       const app = express()
       const maxTTL = vi.fn((body) => body.ttl)
-      const updateSpy = vi.spyOn(cacheModule.getDefaultCache().client, 'adaptiveCacheUpdate')
 
       app.get(
         '/maxttl',
@@ -189,16 +192,10 @@ describe('Adaptive Express Cache', () => {
       await new Promise((r) => setTimeout(r, 100))
 
       expect(maxTTL).toHaveBeenCalledWith({ ttl: 20 })
-      expect(updateSpy).toHaveBeenCalledWith(
-        expect.any(String),
-        expect.any(String),
-        expect.any(String),
-        expect.any(String),
-        expect.any(String),
-        '20',
-        expect.any(String),
-        expect.any(String),
-      )
+      const key = getAdaptiveCacheKey('/maxttl', {}, 'adaptive:')
+      expect((await redisClient.hgetall(key + 'meta')).dataTTL).toBe('5')
+      expect(await redisClient.ttl(key + 'data')).toBeGreaterThan(0)
+      expect(await redisClient.ttl(key + 'data')).toBeLessThanOrEqual(20)
     })
 
     it('should serve cached falsy responses as hits', async () => {

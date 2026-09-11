@@ -7,30 +7,52 @@ local maxTTL = tonumber(ARGV[4])
 local ttlScaling = tonumber(ARGV[5])
 local metaTTL = tonumber(ARGV[6])
 
--- Gets all fields from a hash as a dictionary
-local hgetall = function (key)
-    local bulk = redis.call('HGETALL', key)
-    local result = {}
-    local nextkey
-    for i, v in ipairs(bulk) do
-        if i % 2 == 1 then
-            nextkey = v
-        else
-            result[nextkey] = v
-        end
-    end
-    return result
+if ARGV[13] and ARGV[13] ~= '' and redis.call('GET', ARGV[13]) ~= ARGV[14] then
+  return {'INVALIDATED', 0}
+end
+local prefix = ARGV[8] or ''
+local key = ARGV[9] or string.gsub(dataKey, 'data$', '')
+local stateKey = dataKey .. ':state'
+local legacy = redis.call('GET', '__adaptive:legacy-barrier')
+local barrier = redis.call('GET', prefix .. '__adaptive:barrier')
+local generation = redis.call('GET', prefix .. '__adaptive:namespace')
+if ARGV[7] and ARGV[7] ~= '' then
+  if not legacy or not barrier or not generation or ARGV[7] ~= legacy .. ':' .. barrier .. ':' .. generation then
+    return {'INVALIDATED', 0}
+  end
+end
+local uuid = ARGV[15] or redis.sha1hex(dataKey .. table.concat(redis.call('TIME'), ':') .. tostring(math.random()))
+if not generation then
+  generation = uuid
+  redis.call('SET', prefix .. '__adaptive:namespace', generation)
+end
+local old = redis.call('HMGET', stateKey, 'prefix', 'tags', 'generation')
+if not old[1] then
+  local previousData = redis.call('GET', dataKey)
+  local marker = '@ac-redis:1:'
+  if previousData and string.sub(previousData, 1, #marker) == marker then
+    local previous = cjson.decode(string.sub(previousData, #marker + 1))
+    old = {previous.prefix, cjson.encode(previous.tags), previous.namespace}
+  end
+end
+if old[3] and old[3] ~= generation then redis.call('DEL', metaKey) end
+if old[1] and old[2] then
+  for _, tag in ipairs(cjson.decode(old[2])) do
+    redis.call('SREM', old[1] .. 'tag:' .. tag, key)
+  end
 end
 
--- Fetch metadata
-local metaData = hgetall(metaKey)
+-- Fetch only the fields used for TTL adaptation.
+local metaData = redis.call('HMGET', metaKey, 'dataTTL', 'lastChanged', 'changeCount', 'hash')
+local clock = redis.call('TIME')
+local nowMs = tonumber(clock[1]) * 1000 + math.floor(tonumber(clock[2]) / 1000)
 
 -- Initialize values
-local dataTTL = tonumber(metaData.dataTTL) or initialTTL
-local isChanged = next(metaData) == nil or metaData.hash ~= hash
-local now = isChanged and tonumber(redis.call('TIME')[1]) or nil
-local lastChanged = isChanged and now or tonumber(metaData.lastChanged) or 0
-local changeCount = tonumber(metaData.changeCount or "0")
+local dataTTL = tonumber(metaData[1]) or initialTTL
+local isChanged = metaData[4] ~= hash
+local now = isChanged and tonumber(clock[1]) or nil
+local lastChanged = isChanged and now or tonumber(metaData[2]) or 0
+local changeCount = tonumber(metaData[3] or "0")
 
 if not isChanged then
     -- Calculate new TTL
@@ -44,12 +66,32 @@ if not isChanged then
         dataTTL = math.max(initialTTL, math.min(dataTTL + increase, maxTTL))
     end
 else
-    -- Update change count
-    changeCount = changeCount + 1
     -- Reset TTL to initial on change to adapt quickly
     dataTTL = initialTTL
 end
 
+if isChanged then changeCount = changeCount + 1 end
+dataTTL = math.min(dataTTL, maxTTL)
+local freshTTL = math.max(0.001, dataTTL * tonumber(ARGV[12] or '1'))
+local staleTTL = math.max(0, tonumber(ARGV[11] or '0'))
+local retentionMs = math.max(1, math.floor((freshTTL + staleTTL) * 1000))
+local tags = ARGV[10] or '[]'
+local epochs = {}
+redis.call('HSET', stateKey, 'prefix', prefix, 'tags', tags, 'generation', generation, 'freshUntil', nowMs + math.floor(freshTTL * 1000))
+redis.call('PEXPIRE', stateKey, math.max(retentionMs, metaTTL * 1000))
+for _, tag in ipairs(cjson.decode(tags)) do
+  local epochKey = prefix .. '__adaptive:tag-epoch:' .. tag
+  local epoch = redis.call('GET', epochKey)
+  if not epoch then epoch = uuid; redis.call('SET', epochKey, epoch) end
+  epochs[epochKey] = epoch
+  redis.call('SADD', prefix .. 'tag:' .. tag, key)
+  -- Index lifetime must never be shortened below another member's lifetime.
+  local tagTTL = math.max(retentionMs, metaTTL * 1000)
+  if redis.call('PTTL', epochKey) < tagTTL then redis.call('PEXPIRE', epochKey, tagTTL) end
+  if redis.call('PTTL', prefix .. 'tag:' .. tag) < tagTTL then
+    redis.call('PEXPIRE', prefix .. 'tag:' .. tag, tagTTL)
+  end
+end
 -- Store new metadata
 redis.call('HSET', metaKey, 
   'hash', hash, 
@@ -59,7 +101,7 @@ redis.call('HSET', metaKey,
 -- Set expiration for metadata
 redis.call('EXPIRE', metaKey, metaTTL)
 -- Store actual data with updated TTL
-redis.call('SET', dataKey, data, 'EX', dataTTL)
+local envelope = {data = data, prefix = prefix, namespace = generation, freshUntil = nowMs + math.floor(freshTTL * 1000), epochs = epochs, tags = cjson.decode(tags)}
+redis.call('SET', dataKey, '@ac-redis:1:' .. cjson.encode(envelope), 'PX', retentionMs)
 
--- Return TTL used
 return {'CACHED', dataTTL, lastChanged, changeCount, hash, isChanged and 1 or 0}

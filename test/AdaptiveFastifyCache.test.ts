@@ -1,3 +1,4 @@
+import { getAdaptiveCacheKey } from '../src/utils'
 import { describe, it, expect, beforeAll, afterAll, vi, beforeEach } from 'vitest'
 import { GenericContainer, StartedTestContainer } from 'testcontainers'
 import Fastify from 'fastify'
@@ -111,6 +112,8 @@ describe('Adaptive Fastify Cache', () => {
     expect(res.headers['x-cache']).toBe('BYPASS')
     expect(callCount).toBe(2)
 
+    const key = getAdaptiveCacheKey('/refresh', {}, 'adaptive:')
+    await vi.waitFor(async () => expect(JSON.parse((await cacheModule.getDefaultCache().get(key)).data)).toEqual({ count: 2 }))
     const hit = await fastify.inject({ method: 'GET', url: '/refresh' })
     expect(hit.headers['x-cache']).toBe('HIT')
     expect(JSON.parse(hit.payload)).toEqual({ count: 2 })
@@ -119,7 +122,6 @@ describe('Adaptive Fastify Cache', () => {
 
   it('should handle maxTTL as a function and parse JSON payload', async () => {
     const fastify = Fastify()
-    const updateSpy = vi.spyOn(cacheModule.getDefaultCache().client, 'adaptiveCacheUpdate')
     fastify.register(
       cacheModule.adaptiveFastifyCache({
         maxTTL: (body) => {
@@ -134,16 +136,10 @@ describe('Adaptive Fastify Cache', () => {
 
     await fastify.inject({ method: 'GET', url: '/maxttl' })
     await new Promise((r) => setTimeout(r, 100))
-    expect(updateSpy).toHaveBeenCalledWith(
-      expect.any(String),
-      expect.any(String),
-      expect.any(String),
-      expect.any(String),
-      expect.any(String),
-      '20',
-      expect.any(String),
-      expect.any(String),
-    )
+    const key = getAdaptiveCacheKey('/maxttl', {}, 'adaptive:')
+    expect((await redisClient.hgetall(key + 'meta')).dataTTL).toBe('5')
+    expect(await redisClient.ttl(key + 'data')).toBeGreaterThan(0)
+    expect(await redisClient.ttl(key + 'data')).toBeLessThanOrEqual(20)
   })
 
   it('should serve cached falsy responses as hits', async () => {
