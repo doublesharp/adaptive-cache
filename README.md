@@ -10,9 +10,13 @@ Server-side response caching for APIs that need fast reads without hand-tuning e
 
 `@0xdoublesharp/adaptive-cache` caches Express, Fastify, and direct `AdaptiveCache` results. It hashes response bodies, tracks whether content changes, and automatically grows TTLs for stable data while resetting TTLs for volatile data.
 
-Redis remains the default authoritative backend through Lua scripts. For lower latency hot reads, add a memory-bounded clustered LRU cache in front of Redis. For single-server or one-host Node cluster deployments, the clustered LRU backend can run without Redis.
+Redis remains the default authoritative backend through Lua scripts. To keep hot payloads in memory, add a bounded clustered LRU cache in front of Redis. L1 hits still validate invalidation state against Redis. For single-server or one-host Node cluster deployments, the clustered LRU backend can run without Redis.
 
-This package does not set HTTP `Cache-Control` headers. It caches server responses and adds diagnostic `X-Cache-*` headers unless disabled.
+See [loading, freshness, and cache policy](docs/cache-features.md) for `getOrSet`, stale refresh, negative caching, typed/bulk APIs, write fencing, selective compression, events, and HTTP identity controls.
+
+The feature guide and examples below describe version 0.1.0. New APIs and behavior since 0.0.6 are listed in the [0.1.0 release notes](CHANGELOG.md#010---2026-09-10); see [release history and upgrade instructions](docs/releases.md) before deploying them.
+
+This package does not generate HTTP `Cache-Control` headers. It honors storage restrictions and replays eligible cached headers. It caches server responses and adds diagnostic `X-Cache-*` headers unless disabled.
 
 ## Use It For
 
@@ -21,11 +25,13 @@ This package does not set HTTP `Cache-Control` headers. It caches server respons
 | API responses that stabilize | Increases TTL when response hashes stay the same.                                    |
 | API responses that change    | Resets TTL when content changes, so volatile data does not stay stale for long.      |
 | Cross-host correctness       | Uses Redis Lua as the atomic authority for payloads, metadata, tags, and locks.      |
-| Lower hot-read latency       | Uses `@0xdoublesharp/lru-cache-clustered` as a bounded L1 cache in front of Redis.   |
+| Hot payloads in memory       | Keeps hot payloads in bounded L1 memory with a Redis validation round trip.          |
 | No-Redis deployments         | Provides a volatile `clustered-lru` backend for single-server or one-host clusters.  |
-| Expensive refreshes          | Provides refresh locks so only one worker performs an expensive rebuild at a time.   |
-| Targeted invalidation        | Clears by computed key or tag, with Redis Pub/Sub invalidation for server-local L1s. |
+| Expensive refreshes          | Coalesces `getOrSet` loaders and fences Redis writes after lease loss.               |
+| Targeted invalidation        | Invalidates keys, tags, or namespaces and rejects obsolete Redis writes.             |
 | Memory safety                | Sets L1 size budgets and skips entries that are too large for the configured budget. |
+
+Use `getOrSet` for expensive work that needs coalescing, stale refresh, or negative caching. Use ordinary middleware when a route only needs response caching. Stale background refresh requires an explicit loader.
 
 ## Architecture
 
@@ -43,6 +49,8 @@ This package does not set HTTP `Cache-Control` headers. It caches server respons
 | Refresh locks                  |   Yes   |    Yes     |   Host-local    |
 | Works without Redis            |   No    |     No     |       Yes       |
 | Recommended production default |   Yes   |  Hot APIs  |   Single host   |
+
+All built-in backends support typed/bulk APIs, stale windows, negative caching, selective compression, and events. Redis-backed modes provide atomic loader lease and write-token checks. Clustered LRU provides host-local coordination with weaker write/release guarantees.
 
 ## Installation
 
@@ -118,8 +126,8 @@ app.get(
 
 Read path:
 
-1. Check clustered LRU first.
-2. On L1 hit, return immediately.
+1. Read Redis invalidation barriers and check clustered LRU.
+2. On a valid L1 hit, return the payload without fetching or decoding it from Redis.
 3. On L1 miss, fetch from Redis Lua.
 4. On Redis hit, hydrate L1 with Redis remaining TTL and metadata.
 5. On Redis miss, continue to the handler.
@@ -134,12 +142,16 @@ Write path:
 
 For shutdown-sensitive workers, use `l1Redis.writeMode: 'await-redis'` to wait for Redis before `set()` resolves, or call `cache.flush()` before process shutdown to wait for pending async Redis writes.
 
+Loader writes, middleware writes, and asynchronous compression wait for Redis to accept their write token. Ordinary synchronous `set()` calls retain the optimistic write path above. Every L1 hit validates its token against Redis, including when a Pub/Sub message was missed. This adds a Redis round trip to hot reads in exchange for stronger invalidation guarantees.
+
 Invalidation:
 
-- Explicit clears remove L1 first, then Redis, then publish an invalidation message.
+- Explicit clears drain pending writes on the shared Redis client, delete Redis data, drain active L1 hydrations, remove L1 entries, then publish an invalidation message.
+- Reads that overlap an invalidation cannot hydrate an older snapshot back into L1.
 - Tag invalidation removes matching L1 entries and Redis entries.
 - Redis update publishes L1 invalidation only when content changed.
 - Other server-local L1 caches subscribe to Redis invalidation messages and delete stale keys.
+- Namespace and write barriers prevent invalidated in-flight work from becoming a later cache hit.
 
 Locks:
 
@@ -165,11 +177,11 @@ await fastify.register(
 )
 ```
 
-This mode keeps adaptive metadata in clustered LRU envelopes. It is fast and memory-bounded, but it is not cross-host durable. Treat it as process/host-local cache state.
+This mode keeps adaptive metadata in separate bounded LRU entries for `metaTTL`, so unchanged data can increase its TTL after the payload expires. It is fast and memory-bounded, but it is not cross-host durable. Treat it as process/host-local cache state.
 
 Locks:
 
-- `clustered-lru` uses LRU lock keys scoped to the local Node cluster primary.
+- `clustered-lru` acquires locks atomically on the local Node cluster primary. Lock release is best-effort: the dependency has no atomic compare-and-delete operation, so release can race with an expired or force-replaced lock. Use a Redis-backed backend when strict refresh coordination is required.
 
 ## LRU Memory Limits
 
@@ -344,20 +356,67 @@ const cache = new AdaptiveCache({
   lru: { namespace: 'jobs' },
 })
 
-await cache.set('job:summary', { total: 42 }, { tags: ['jobs'] })
+await cache.set('adaptive:job:summary', { total: 42 }, { tags: ['jobs'] })
 
-const hit = await cache.get('job:summary')
+const hit = await cache.get<{ total: number }>('adaptive:job:summary')
 if (hit) {
   console.log(hit.data, hit.ttl, hit.metadata)
 }
 
 await cache.flush()
-await cache.quit()
+await cache.close()
 ```
 
-Payloads are stored in a versioned envelope so direct API calls can round-trip JSON values, strings, buffers, and `undefined`. Middleware caches parsed JSON responses when possible and plain text as strings.
+Direct API keys are complete keys. `keyPrefix` selects coordination and invalidation state but does not prepend text to a direct key. Middleware constructs prefixed keys automatically.
 
-### Generic Function Caching
+Payloads are stored in a versioned envelope so direct API calls can round-trip JSON values, strings, buffers, and `undefined`. Middleware caches eligible successful GET responses with their status, selected headers, and original body. JSON-looking text and binary responses retain their representation on a hit. Other methods and Node/WHATWG streams bypass caching. HTTP 404 responses require an explicit `negativeTTL`. Existing body-only cache entries remain readable until they expire.
+
+### Coalesced loading and stale refresh
+
+```typescript
+const cache = new AdaptiveCache({
+  keyPrefix: 'catalog:v2:',
+  initialTTL: 10,
+  maxTTL: 300,
+  staleWhileRevalidate: 30,
+  staleIfError: 120,
+  ttlJitter: 0.1,
+  compression: { minBytes: 1024, async: true, skipCompressed: true, onlyIfSmaller: true },
+})
+
+const product = await cache.getOrSet('catalog:v2:product:42', () => loadProduct('42'), {
+  tags: ['products'],
+  negativeTTL: 5,
+})
+const hits = await cache.getMany(['catalog:v2:product:42', 'catalog:v2:product:43'])
+await cache.invalidateTags(['products'])
+await cache.invalidateNamespace()
+await cache.close()
+```
+
+Stale windows are measured independently from freshness expiry. Plain `get()` returns fresh entries only; `get(key, { allowStale: true })` exposes retained stale data. Negative entries have no stale window. See the [feature guide](docs/cache-features.md) for force-refresh behavior, events, fingerprints, bulk operations, and custom backend limits.
+
+### HTTP identity and response policy
+
+Range and If-Range requests bypass caching, and partial `206` responses are not stored. Authorization and Cookie requests bypass caching unless explicitly enabled with a key or variation that isolates the caller. Responses with `Cache-Control: private` or `no-store`, `Set-Cookie`, `Vary: *`, or undeclared `Vary` headers are excluded. Declare `varyBy: ['Accept-Encoding']` when compression middleware adds that response header.
+
+```typescript
+const products = adaptiveExpressCache({
+  keyPrefix: 'catalog:v2:',
+  key: (req) => `product:${req.params?.id}`,
+  varyBy: ['Accept-Language'],
+  loader: (req) => loadProduct(req.params?.id),
+  staleWhileRevalidate: 30,
+})
+app.get('/products/:id', products)
+
+// During shutdown, after accepting no further requests:
+await products.close()
+```
+
+Fastify accepts the same policy options and closes owned caches in its `onClose` hook. Both adapters accept `cache` to reuse a caller-owned instance. Keep that instance's namespace aligned with the middleware prefix. Use `products.clear(request)` to invalidate a response using the same custom key and header variations as the adapter. See [HTTP identity and ownership](docs/cache-features.md#http-identity-and-ownership).
+
+### Generic function caching
 
 `cacheResult` is a simple Redis helper for non-adaptive function results. It uses the default Redis client directly and does not use the adaptive backend layer.
 
@@ -415,13 +474,28 @@ await shouldRefreshCache('report:last-update', 60, false, 120)
 | `includeDebugHeaders`   | `boolean`                                                          | `false`       | Add adaptive metadata headers.                                                        |
 | `forceRefresh`          | `boolean`                                                          | `false`       | Bypass existing cache reads and refresh after the handler response.                   |
 | `lockExpirationSeconds` | `number`                                                           | `60`          | Refresh lock expiration in seconds.                                                   |
-| `metaTTL`               | `number`                                                           | `604800`      | Metadata/tag TTL in seconds.                                                          |
+| `metaTTL`               | `number`                                                           | `604800`      | Metadata/tag TTL in positive integer seconds.                                         |
 | `compress`              | `boolean`                                                          | `true`        | Gzip payloads and store them as base64.                                               |
 | `logLevel`              | `'debug' \| 'info' \| 'warn' \| 'error' \| 'silent'`               | `'info'`      | Logger verbosity.                                                                     |
 | `backend`               | `'redis' \| 'l1-redis' \| 'clustered-lru' \| AdaptiveCacheBackend` | `'redis'`     | Cache backend.                                                                        |
 | `lru`                   | `AdaptiveCacheLruOptions`                                          | unset         | LRU options for `l1-redis` and `clustered-lru`.                                       |
 | `l1Redis.writeMode`     | `'async' \| 'await-redis'`                                         | `'async'`     | Whether `l1-redis` returns after L1 write or waits for Redis reconciliation.          |
 | `ignoreQueryParams`     | `string[]`                                                         | `['refresh']` | Query parameters excluded from middleware cache-key hashes.                           |
+
+Additional options shared by the cache and adapters:
+
+| Option                         | Default | Purpose                                                                                        |
+| ------------------------------ | ------- | ---------------------------------------------------------------------------------------------- |
+| `staleWhileRevalidate`         | `0`     | Seconds after freshness expiry during which a loader can refresh in the background.            |
+| `staleIfError`                 | `0`     | Independent seconds after freshness expiry during which a failed loader may return stale data. |
+| `negativeTTL`                  | `0`     | Opt-in TTL for null/undefined loader results or normal-handler HTTP 404 responses.             |
+| `lockWaitTimeoutMs`            | `5000`  | Maximum loader lock wait in milliseconds.                                                      |
+| `ttlJitter`                    | `0`     | Fraction from 0 to 1 by which to randomly shorten freshness.                                   |
+| `fingerprint` / `ignoreFields` | unset   | Custom content fingerprint or dotted fields excluded from the hash.                            |
+| `compression`                  | unset   | `minBytes`, `async`, `skipCompressed`, and `onlyIfSmaller` selective codec settings.           |
+| `onEvent`                      | unset   | Observer for cache activity; also available through `cache.onEvent()`.                         |
+
+HTTP-only options are `cache`, `loader`, `key`, `varyBy`, `shouldCache`, `cacheAuthenticated`, `cacheCookies`, and request-derived `tags`. Defaults bypass authenticated/cookie requests and use path/query keys. See the [feature guide](docs/cache-features.md) for examples and per-call overrides.
 
 ## Headers
 
@@ -440,16 +514,19 @@ await shouldRefreshCache('report:last-update', 60, false, 120)
 
 Given an adaptive key, this package uses:
 
-- `${key}data`: encoded payload.
+- `${key}data`: versioned Redis envelope containing encoded payload, freshness, namespace generation, tags, and tag epochs.
+- `${key}data:state`: auxiliary freshness and tag membership state.
 - `${key}meta`: adaptive metadata hash.
 - `${redisPrefix}tag:${tag}`: Redis set of keys for tag invalidation.
 - `${redisPrefix}l1:invalidate`: Redis Pub/Sub channel for L1 invalidations.
 - `${lastUpdateKey}-lock`: refresh lock key.
+- `${redisPrefix}__adaptive:namespace`, `${redisPrefix}__adaptive:barrier`, and `${redisPrefix}__adaptive:tag-epoch:${tag}`: invalidation control keys.
+- `__adaptive:legacy-barrier`: shared barrier for clears without namespace information.
 
 Lua fetch returns:
 
 ```text
-[data, remainingTTL, dataTTL, lastChanged, changeCount, hash]
+[data, remainingTTL, dataTTL, lastChanged, changeCount, hash, staleFlag, staleAgeMs]
 ```
 
 Lua update returns:
@@ -458,14 +535,18 @@ Lua update returns:
 ['CACHED', dataTTL, lastChanged, changeCount, hash, changedFlag]
 ```
 
-The original leading tuple fields are preserved for compatibility. New metadata fields are appended so L1 caches can hydrate from Redis without extra round trips.
+Fetch preserves the original leading fields and appends stale state. The public hit reports `staleAge` in seconds. A rejected write returns `['INVALIDATED', 0]`. These internal Lua results do not imply wire-format compatibility with older readers; see the [upgrade notes](docs/releases.md#upgrading-from-006).
 
-## Adaptive TTL Formula
+## TTL policies
+
+The default policy preserves the existing TTL growth/reset behavior. Opt into additive increase/multiplicative decrease with `ttlPolicy: { type: 'aimd' }`, or time-aware smoothing with `ttlPolicy: { type: 'ewma' }`. Both are available on all built-in backends. See [TTL policies](docs/ttl-policies.md) for parameters, formulas, and observation limits.
+
+## Default adaptive TTL formula
 
 On changed content:
 
 - `changeCount += 1`
-- `dataTTL = initialTTL`
+- `dataTTL = min(initialTTL, maxTTL)`
 - `lastChanged = now`
 
 On unchanged content:
@@ -479,6 +560,8 @@ increaseFactor = max(0, ttlScaling - 1)
 increase = ceil(floor(dataTTL * increaseFactor) * decayFactor)
 dataTTL = max(initialTTL, min(dataTTL + increase, maxTTL))
 ```
+
+After either path, clamp `dataTTL` to `maxTTL`. Optional jitter shortens freshness; stale retention extends physical storage without extending the fresh TTL.
 
 ## Environment Variables
 
@@ -523,19 +606,29 @@ const backend: AdaptiveCacheBackend = {
 }
 ```
 
+Custom backends can implement `captureWriteToken`, `invalidateNamespace`, and `onEvent`. `getOrSet` requires write-token support, and `supportsWriteFencing()` reports whether that method exists. It does not certify distributed atomicity: the backend must enforce tokens and leases during writes. A backend without namespace invalidation fails explicitly when that operation is requested.
+
 ## Operational Notes
 
-- Redis is the durable, cross-host authority in `redis` and `l1-redis` modes.
+- Redis is the cross-host authority in `redis` and `l1-redis` modes. Persistence depends on the Redis deployment configuration.
 - `clustered-lru` is volatile and local to the host/Node cluster.
 - L1 entries are intentionally short-lived until Redis Lua returns the authoritative adaptive TTL.
 - Oversized entries are skipped for L1 storage rather than risking unbounded server memory growth.
 - `l1-redis` invalidation uses Redis Pub/Sub, so processes must share the same Redis and prefix to invalidate each other.
 - `?refresh=true` bypasses reads but is ignored when computing the cache key, so refresh requests update the normal key.
-- Explicit `clear(key)` removes the data and metadata keys. Existing tag sets may contain stale members until their `metaTTL` expires.
+- Explicit `clear(key)` removes data, metadata, and auxiliary state and cleans recorded tag memberships. Namespace invalidation advances a generation without scanning payloads; old payloads expire normally.
 - Call `cache.flush()` before shutdown if you use default async `l1-redis` writes and need to wait for pending Redis reconciliation.
 - `redisPrefix` still works; prefer `keyPrefix` for new code when you want a backend-neutral name.
 
 ## Development
+
+Dependency resolution uses a seven-day minimum release age, configured as `minimumReleaseAge: 10080` in `pnpm-workspace.yaml`. Do not add release-age exclusions. Run `pnpm update --latest` to select eligible updates, then check peer compatibility and run the quality gate. The current toolchain keeps TypeScript at 6.0.3 because the installed ESLint parser declares support below 6.1.
+
+Implementation files follow responsibility boundaries: `AdaptiveCache.ts` owns the public API and lifecycle; `CacheLoader.ts` handles coalescing, freshness windows, and loader locks; `payload.ts` handles fingerprints and codecs. TTL policy validation and calculations have dedicated modules. HTTP adapters use shared policy/response helpers, and `backends/lruEnvelope.ts` contains LRU TTL and envelope calculations. Tests are grouped by backend, loader behavior, response policy, and lifecycle, with fixtures under `test/helpers`.
+
+Keep new behavior in the module that owns it. Split files when they accumulate distinct responsibilities, and preserve behavioral tests when moving code.
+
+Every Vitest test must contain an assertion. Prefer stored state and real HTTP responses over log-only or mock-only checks.
 
 ```bash
 pnpm install
@@ -562,6 +655,12 @@ Lines      : 100%
 `pnpm run quality` runs lint, typecheck, coverage, and build.
 
 `pnpm run bench:configs` compares `redis`, `l1-redis`, and `clustered-lru` behavior against a local Redis using unique benchmark key prefixes. It does not call `FLUSHALL`.
+
+## Releases and verification
+
+[CHANGELOG.md](CHANGELOG.md) records changes through version 0.1.0. [Release history and process](docs/releases.md) records the source revisions, migration steps, and release checklist. Keep release entries separate when preparing a version; do not replace the preceding entry.
+
+The [2026-09-10 verification report](docs/features-verification-2026-09-10.md) records the feature checks and performance sample. The [earlier audit report](docs/review-2026-09-10.md) documents the preceding bug/test/dependency review and is a historical snapshot.
 
 ## License
 
