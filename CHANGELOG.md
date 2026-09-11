@@ -2,6 +2,29 @@
 
 Notable changes by version. See [release history and process](docs/releases.md) for historical source revisions and upgrade instructions.
 
+## 0.1.1 - 2026-09-11
+
+### Added
+
+- Optional backend `fetchMany()` support, with results aligned to each input, including duplicate keys. Existing custom backends continue to work without changes.
+- `bench:lru` worker benchmarks with IPC counts and checks for primary-side replacement, tag and namespace invalidation, and IPC backpressure. See the [dependency evaluation](docs/lru-cache-clustered-2.1.1.md).
+
+### Changed
+
+- Batch clustered-LRU `getMany()` payload and primary epoch reads through upstream `mGet()`, preserving result order, duplicate-key events, decoding, and shutdown draining. Redis and L1-plus-Redis keep their existing read paths.
+- Reduce worker-to-primary requests for a 32-key batch from 96 to 2 without L1, and from 64 to 1 with warm L1. Local paired benchmarks measured median batch throughput gains of 51% and 133%, respectively; results vary by workload. See the [batch-read verification and performance report](docs/batched-reads-0.1.1.md).
+- Update the optional `@0xdoublesharp/lru-cache-clustered` peer and development dependency to `^2.1.1`, incorporating IPC backpressure fixes and reduced local-L1 hydration traffic.
+
+### Fixed
+
+- Recheck clustered-LRU entry retention after primary epoch validation so scalar and batch reads cannot return expired entries, even with `allowStale`.
+- Reject empty `getMany()` calls after closure, consistently with other reads.
+
+### Upgrade notes
+
+- Clustered-LRU users must install `@0xdoublesharp/lru-cache-clustered@^2.1.1`. The cache wire format is unchanged from 0.1.0.
+- Batch reads preserve the existing clustered-LRU consistency limits and are not atomic multi-key transactions.
+
 ## 0.1.0 - 2026-09-10
 
 This version adds loader and cache-policy APIs and changes the Redis format and HTTP caching defaults. Review the upgrade notes before deploying.

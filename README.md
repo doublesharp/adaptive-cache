@@ -14,7 +14,7 @@ Redis remains the default authoritative backend through Lua scripts. To keep hot
 
 See [loading, freshness, and cache policy](docs/cache-features.md) for `getOrSet`, stale refresh, negative caching, typed/bulk APIs, write fencing, selective compression, events, and HTTP identity controls.
 
-The feature guide and examples below describe version 0.1.0. New APIs and behavior since 0.0.6 are listed in the [0.1.0 release notes](CHANGELOG.md#010---2026-09-10); see [release history and upgrade instructions](docs/releases.md) before deploying them.
+The feature guide and examples below describe version 0.1.1. See the [0.1.1 release notes](CHANGELOG.md#011---2026-09-11) for batching and dependency fixes, and [0.1.0 release notes](CHANGELOG.md#010---2026-09-10) for new APIs and behavior since 0.0.6; see [release history and upgrade instructions](docs/releases.md) before deploying them.
 
 This package does not generate HTTP `Cache-Control` headers. It honors storage restrictions and replays eligible cached headers. It caches server responses and adds diagnostic `X-Cache-*` headers unless disabled.
 
@@ -72,7 +72,7 @@ pnpm add fastify
 LRU-backed modes require optional peer dependencies:
 
 ```bash
-pnpm add @0xdoublesharp/lru-cache-clustered@^2.1.0 lru-cache@^11
+pnpm add @0xdoublesharp/lru-cache-clustered@^2.1.1 lru-cache@^11
 ```
 
 Redis-only users do not need the LRU packages at runtime.
@@ -208,7 +208,7 @@ Entry size is estimated as encoded payload bytes plus tag metadata and a small f
 
 ## LRU Cache Clustered v2.1 Local L1
 
-The `lru.localL1` option is passed through to `@0xdoublesharp/lru-cache-clustered` v2.1.0+ for per-worker local L1 caching.
+The `lru.localL1` option is passed through to `@0xdoublesharp/lru-cache-clustered` v2.1.1+ for per-worker local L1 caching.
 
 ```typescript
 adaptiveExpressCache({
@@ -233,7 +233,7 @@ adaptiveExpressCache({
 })
 ```
 
-You can also pass `localL1: true` when using `@0xdoublesharp/lru-cache-clustered` v2.1.0 or newer.
+You can also pass `localL1: true` when using `@0xdoublesharp/lru-cache-clustered` v2.1.1 or newer.
 
 ## Express Usage
 
@@ -393,6 +393,8 @@ await cache.invalidateTags(['products'])
 await cache.invalidateNamespace()
 await cache.close()
 ```
+
+`getMany()` uses batched payload and primary invalidation checks on clustered LRU. Results and events remain per key; the call is not a transaction. See the [batch-read report](docs/batched-reads-0.1.1.md) for measured gains and backend compatibility.
 
 Stale windows are measured independently from freshness expiry. Plain `get()` returns fresh entries only; `get(key, { allowStale: true })` exposes retained stale data. Negative entries have no stale window. See the [feature guide](docs/cache-features.md) for force-refresh behavior, events, fingerprints, bulk operations, and custom backend limits.
 
@@ -652,13 +654,15 @@ Functions  : 100%
 Lines      : 100%
 ```
 
-`pnpm run quality` runs lint, typecheck, coverage, and build.
+`pnpm run quality` runs lint, typecheck, coverage, build, and built-declaration consumer checks.
+
+`pnpm run bench:lru` measures primary-process and real worker-process clustered LRU operations, with and without local L1. It also checks retained worker invalidation and delivered IPC requests under backpressure. See the [2.1.1 dependency evaluation](docs/lru-cache-clustered-2.1.1.md) for comparison results.
 
 `pnpm run bench:configs` compares `redis`, `l1-redis`, and `clustered-lru` behavior against a local Redis using unique benchmark key prefixes. It does not call `FLUSHALL`.
 
 ## Releases and verification
 
-[CHANGELOG.md](CHANGELOG.md) records changes through version 0.1.0. [Release history and process](docs/releases.md) records the source revisions, migration steps, and release checklist. Keep release entries separate when preparing a version; do not replace the preceding entry.
+[CHANGELOG.md](CHANGELOG.md) records changes through version 0.1.1. [Release history and process](docs/releases.md) records the source revisions, migration steps, and release checklist. Keep release entries separate when preparing a version; do not replace the preceding entry.
 
 The [2026-09-10 verification report](docs/features-verification-2026-09-10.md) records the feature checks and performance sample. The [earlier audit report](docs/review-2026-09-10.md) documents the preceding bug/test/dependency review and is a historical snapshot.
 

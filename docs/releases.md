@@ -1,6 +1,10 @@
 # Release history and process
 
-The [changelog](../CHANGELOG.md) is the version-by-version record. The [README](../README.md) and [feature guide](cache-features.md) describe version 0.1.0.
+The [changelog](../CHANGELOG.md) is the version-by-version record. The [README](../README.md) and [feature guide](cache-features.md) describe version 0.1.1.
+
+## Version 0.1.1
+
+Version 0.1.1 optimizes clustered-LRU bulk reads. LRU-backed modes require the optional peer `@0xdoublesharp/lru-cache-clustered@^2.1.1`; Redis-only users do not need it. Existing `getMany()` callers use the optimized path automatically on clustered LRU. Redis and L1 Redis retain their existing read behavior. There is no additional wire-format migration from 0.1.0. Empty `getMany()` calls now reject after closure. See the [release notes](../CHANGELOG.md#011---2026-09-11) and [verification report](batched-reads-0.1.1.md).
 
 ## Version 0.1.0
 
@@ -23,7 +27,7 @@ The 0.0.6 commit changed the existing 0.0.5 changelog heading and expanded its c
 
 ## Upgrading from 0.0.6
 
-These steps apply when moving from 0.0.6 to 0.1.0.
+These steps apply when moving from 0.0.6 to 0.1.0 or 0.1.1.
 
 1. Select a new namespace, such as `catalog:v2:`, for a rollout that overlaps older readers. Set middleware `keyPrefix` and the injected cache's `keyPrefix` consistently. Direct API keys are complete strings, so update their prefixes too. For LRU-backed deployments, use a distinct `lru.namespace` to isolate old and new processes.
 2. Let old entries expire under their original prefixes. New Redis envelopes are unreadable by old code. New readers can read legacy entries, but legacy entries do not gain the new invalidation guarantees. Selective compression also writes a new codec marker; legacy compressed entries still require their matching `compress` setting.

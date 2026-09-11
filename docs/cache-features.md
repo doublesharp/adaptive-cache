@@ -1,6 +1,6 @@
 # Loading, freshness, and cache policy
 
-This guide describes version 0.1.0. See the [0.1.0 release notes](../CHANGELOG.md#010---2026-09-10) for the change list and [upgrade instructions](releases.md#upgrading-from-006) for compatibility and rollout steps.
+This guide describes version 0.1.1. See the [0.1.1 release notes](../CHANGELOG.md#011---2026-09-11) for the change list and [upgrade instructions](releases.md#upgrading-from-006) for compatibility and rollout steps.
 
 ## Load a value once
 
@@ -108,7 +108,11 @@ Events cover hits, misses, stale reads, refreshes, writes, invalidation, lock co
 
 LRU eviction counts include internal metadata and coordination entries reported by the dependency. Fenced writes rejected after invalidation emit an invalidation event with reason `write-rejected`. Loader lock-release failures emit an error event with reason `lock-release`; cleanup does not replace the loader result or its original error. Public lock operations participate in shutdown draining and reject new calls once closing begins.
 
-Bulk helpers return explicit outcomes: `getMany(keys)` returns a `Map` of each key to a typed hit or `null`; `setMany([{ key, data, options }])` and `clearMany(keys)` await all submitted operations. They are concurrent convenience APIs, not multi-key transactions.
+Bulk helpers return explicit outcomes: `getMany(keys)` returns a `Map` of each key to a typed hit or `null`; `setMany([{ key, data, options }])` and `clearMany(keys)` await all submitted operations. They are convenience APIs, not multi-key transactions.
+
+On clustered LRU, `getMany()` batches payload reads using upstream `mGet()`, then reads distinct namespace, entry, and tag epochs from the primary. Missing or changed controls return misses, and retention is checked after the control read. Duplicate keys retain per-occurrence events and Map insertion order. Redis, L1 Redis, and custom backends without batch support retain individual reads. All reads, including empty `getMany()` calls, reject after close.
+
+Custom backends may implement `fetchMany(inputs)`, returning one result or `null` per input in exactly the same order, including duplicates. A result-length mismatch rejects the operation. Payload decoding and events use the same path as `get()`; a batch error emits a read error for every requested key. Each accepted read remains tracked until decoding completes, even if another key has already failed.
 
 ## HTTP identity and ownership
 
