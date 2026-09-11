@@ -16,8 +16,8 @@ importers:
         version: 6.0.0
     devDependencies:
       '@0xdoublesharp/lru-cache-clustered':
-        specifier: ^2.1.0
-        version: 2.1.0(lru-cache@11.5.2)
+        specifier: ^2.1.1
+        version: 2.1.1(lru-cache@11.5.2)
       '@eslint/js':
         specifier: ^10.0.1
         version: 10.0.1(eslint@10.9.1)
@@ -78,8 +78,8 @@ importers:
 
 packages:
 
-  '@0xdoublesharp/lru-cache-clustered@2.1.0':
-    resolution: {integrity: sha512-r9CuE/hqPsqtXrSf+wIxgZzyJKjqRklh7xPD1xlUMD99QNuDIt0QvEtAs8y8X3iv7bn/urI8gz+u2plyr5R/bQ==}
+  '@0xdoublesharp/lru-cache-clustered@2.1.1':
+    resolution: {integrity: sha512-iuzRNWGbHOE0bLJlaFpztRwJTEHLUO4A21eKGdvoZpPyci9Bj/cdSJMvG/wSMNSXfea4Efbz7woDvHjHqrPVGQ==}
     engines: {node: '>=22'}
     peerDependencies:
       lru-cache: ^11
@@ -2401,7 +2401,7 @@ packages:
 
 snapshots:
 
-  '@0xdoublesharp/lru-cache-clustered@2.1.0(lru-cache@11.5.2)':
+  '@0xdoublesharp/lru-cache-clustered@2.1.1(lru-cache@11.5.2)':
     dependencies:
       debug: 4.4.3
       lru-cache: 11.5.2
