@@ -1,4 +1,4 @@
-name: Publish to npm
+name: Publish to npm and GitHub
 
 on:
   push:
@@ -54,3 +54,31 @@ jobs:
 
       - name: Publish to npm with provenance
         run: npm publish --access public --provenance
+
+  release:
+    name: Create GitHub release
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Create release for published version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME already exists."
+            exit 0
+          fi
+
+          FLAGS=()
+          if [[ "${GITHUB_REF_NAME%%+*}" == *-* ]]; then
+            FLAGS+=(--prerelease)
+          fi
+
+          gh release create "$GITHUB_REF_NAME" \
+            --verify-tag \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            "${FLAGS[@]}"
