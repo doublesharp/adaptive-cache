@@ -23,3 +23,5 @@ coverage.json
 node_modules
 
 dist
+# Raw benchmark evidence belongs outside Git
+docs/benchmarks/*.jsonl

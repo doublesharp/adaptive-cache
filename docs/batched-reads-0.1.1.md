@@ -41,7 +41,7 @@ Message counts are deterministic for this workload and directly explain the work
 | Warm L1 enabled |                                64 |                                1 |
 | Primary process |                                 0 |                                0 |
 
-These counts exclude response messages. Actual counts depend on cached payloads and whether any control keys require validation. [All 14 timing samples](benchmarks/batched-reads-0.1.1.jsonl) include throughput, p95 latency, and request counts.
+These counts exclude response messages. Actual counts depend on cached payloads and whether any control keys require validation. The original fourteen timing samples recorded throughput, p95 latency, and request counts. Raw run evidence is kept outside the repository.
 
 ## Correctness and package checks
 
