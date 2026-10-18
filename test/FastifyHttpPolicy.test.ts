@@ -2,8 +2,11 @@ import { describe, expect, it } from 'vitest'
 import Fastify from 'fastify'
 import { adaptiveFastifyCache } from '../src/AdaptiveFastifyCache'
 import { encodeHttpResponse } from '../src/httpResponse'
-import { getAdaptiveCacheKey } from '../src/utils'
+import { getAdaptiveCacheKey as baseAdaptiveCacheKey } from '../src/utils'
 import { ControlledBackend, controlledCache } from './helpers/httpFixtures'
+
+const getAdaptiveCacheKey = (...args: Parameters<typeof baseAdaptiveCacheKey>) =>
+  baseAdaptiveCacheKey(args[0], args[1], args[2], args[3], 'localhost:80')
 
 describe('Fastify HTTP policy and lifecycle', () => {
   it('partitions by declared request headers and replays identity headers', async () => {

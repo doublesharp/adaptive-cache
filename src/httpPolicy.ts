@@ -31,8 +31,18 @@ export const snapshotHttpResponse = (response: HttpResponseLike) => {
   }
 }
 
-export const isCacheableHttpBody = (body: unknown) =>
-  !(body instanceof Readable) && !(body instanceof WebReadableStream)
+export const normalizeHttpBody = (body: unknown): any =>
+  ArrayBuffer.isView(body) ? Buffer.from(body.buffer, body.byteOffset, body.byteLength) : body
+
+export const isCacheableHttpBody = (body: unknown): boolean => {
+  if (body instanceof Readable || body instanceof WebReadableStream) return false
+  if (body === null || body === undefined || typeof body === 'string' || typeof body === 'boolean') return true
+  if (typeof body === 'number') return Number.isFinite(body)
+  if (ArrayBuffer.isView(body)) return true
+  if (Array.isArray(body)) return body.every(isCacheableHttpBody)
+  if (typeof body !== 'object' || Object.getPrototypeOf(body) !== Object.prototype) return false
+  return Object.values(body).every(isCacheableHttpBody)
+}
 
 export type HttpPolicyOptions<Req extends HttpRequestLike = HttpRequestLike> = {
   key?: (req: Req) => string
@@ -165,6 +175,9 @@ export const buildHttpCacheKey = <Req extends HttpRequestLike>(input: {
     input.key ? {} : input.query,
     input.cachePrefix,
     input.ignoreQueryParams,
+    input.key
+      ? undefined
+      : String(getRequestHeader(input.req, 'host') ?? getRequestHeader(input.req, ':authority') ?? ''),
   )
 
   if (!input.varyBy) return base

@@ -5,13 +5,16 @@ import { ReadableStream } from 'node:stream/web'
 import { AdaptiveCache } from '../src/AdaptiveCache'
 import { adaptiveFastifyCache } from '../src/AdaptiveFastifyCache'
 import { encodeHttpResponse } from '../src/httpResponse'
-import { getAdaptiveCacheKey } from '../src/utils'
+import { getAdaptiveCacheKey as baseAdaptiveCacheKey } from '../src/utils'
 import {
   ControlledBackend,
   controlledCache,
   queueStaleThenUnsafeResponse,
   queueStaleThenLegacyResponse,
 } from './helpers/httpFixtures'
+
+const getAdaptiveCacheKey = (...args: Parameters<typeof baseAdaptiveCacheKey>) =>
+  baseAdaptiveCacheKey(args[0], args[1], args[2], args[3], 'localhost:80')
 
 describe('Fastify HTTP loaders', () => {
   it('bypasses a Fastify loader when its custom authentication key is empty', async () => {
@@ -381,7 +384,7 @@ describe('Fastify HTTP loaders', () => {
     const response = await fastify.inject('/loader-error')
 
     expect(response.statusCode).toBe(500)
-    expect(response.headers['x-cache']).toBe('RETRY')
+    expect(response.headers['x-cache']).toBe('MISS')
     expect(handlerCalls).toBe(0)
     expect(backend.entries.size).toBe(0)
     await fastify.close()

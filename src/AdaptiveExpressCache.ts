@@ -1,3 +1,10 @@
+import {
+  createHttpLoader,
+  HttpSourceError,
+  isHttpLoadCancellation,
+  unwrapHttpSourceError,
+  UNSHAREABLE_HTTP_RESULT,
+} from './httpLoader'
 import { encodeHttpResponse, decodeHttpResponse, CachedHttpHeaders } from './httpResponse'
 import {
   boundedNegativeTTL,
@@ -8,6 +15,7 @@ import {
   isRequestCacheable,
   isResponseCacheable,
   snapshotHttpResponse,
+  normalizeHttpBody,
 } from './httpPolicy'
 import { AdaptiveCache } from './AdaptiveCache'
 import { getDefaultCache } from './singleton'
@@ -32,20 +40,20 @@ export type ExpressResponseLike = HttpResponseLike & {
 
 type ExpressNextFunctionLike = (err?: unknown) => void
 
-export type AdaptiveExpressCacheOptions = AdaptiveCacheOptions &
-  HttpPolicyOptions<ExpressRequestLike> & {
+export type AdaptiveExpressCacheOptions<Req extends ExpressRequestLike = ExpressRequestLike> = AdaptiveCacheOptions &
+  HttpPolicyOptions<Req> & {
     cache?: AdaptiveCache
-    tags?: string[] | ((req: ExpressRequestLike) => string[])
-    loader?: (req: ExpressRequestLike) => Promise<unknown>
+    tags?: string[] | ((req: Req) => string[])
+    loader?: (req: Req) => Promise<unknown>
   }
 
-export type AdaptiveExpressCacheMiddleware = ((
+export type AdaptiveExpressCacheMiddleware<Req extends ExpressRequestLike = ExpressRequestLike> = ((
   req: ExpressRequestLike,
   res: ExpressResponseLike,
   next: ExpressNextFunctionLike,
 ) => Promise<unknown>) & {
   cache: AdaptiveCache
-  clear: (req: ExpressRequestLike) => Promise<void>
+  clear: (req: Req) => Promise<void>
   flush: () => Promise<void>
   close: () => Promise<void>
 }
@@ -81,7 +89,9 @@ const captureWriteToken = async (cache: AdaptiveCache): Promise<{ token?: string
   }
 }
 
-export const adaptiveExpressCache = (options: AdaptiveExpressCacheOptions = {}): AdaptiveExpressCacheMiddleware => {
+export const adaptiveExpressCache = <Req extends ExpressRequestLike = ExpressRequestLike>(
+  options: AdaptiveExpressCacheOptions<Req> = {},
+): AdaptiveExpressCacheMiddleware<Req> => {
   const {
     redisPrefix = 'adaptive:',
     keyPrefix,
@@ -93,10 +103,8 @@ export const adaptiveExpressCache = (options: AdaptiveExpressCacheOptions = {}):
   } = options
   const cachePrefix = keyPrefix || redisPrefix
   const owned = !options.cache
-  const cacheInstance =
-    options.cache ||
-    new AdaptiveCache(options, shouldShareDefaultRedisClient(options) ? getDefaultCache().client : undefined)
-  const requestCacheKey = (req: ExpressRequestLike) =>
+  const cacheInstance = options.cache || new AdaptiveCache(options)
+  const requestCacheKey = (req: Req) =>
     buildHttpCacheKey({
       req,
       requestPath: req.originalUrl.split('?')[0],
@@ -108,6 +116,7 @@ export const adaptiveExpressCache = (options: AdaptiveExpressCacheOptions = {}):
     })
   const pendingWrites = new Set<Promise<unknown>>()
   let closed = false
+  let closePromise: Promise<void> | undefined
 
   if (typeof options.lockExpirationSeconds === 'number') {
     AdaptiveCache.setDefaultLockExpirationSeconds(options.lockExpirationSeconds)
@@ -120,7 +129,7 @@ export const adaptiveExpressCache = (options: AdaptiveExpressCacheOptions = {}):
     return promise
   }
 
-  const clear = async (req: ExpressRequestLike): Promise<void> => {
+  const clear = async (req: Req): Promise<void> => {
     if (owned && closed) throw new Error('HTTP cache adapter is closed')
     const key = requestCacheKey(req)
     if (!key) throw new TypeError('Custom cache key must be a non-empty string')
@@ -132,14 +141,16 @@ export const adaptiveExpressCache = (options: AdaptiveExpressCacheOptions = {}):
     await cacheInstance.flush()
   }
 
-  const close = async () => {
-    if (!owned || closed) return
-    closed = true
-    await Promise.allSettled([...pendingWrites])
-    await cacheInstance.close()
+  const close = (): Promise<void> => {
+    if (!owned) return Promise.resolve()
+    if (!closePromise) {
+      closed = true
+      closePromise = cacheInstance.close()
+    }
+    return closePromise
   }
 
-  const responseCacheable = (req: ExpressRequestLike, response: HttpResponseLike) => {
+  const responseCacheable = (req: Req, response: HttpResponseLike) => {
     try {
       return isResponseCacheable(req, response, options)
     } catch (error) {
@@ -148,34 +159,32 @@ export const adaptiveExpressCache = (options: AdaptiveExpressCacheOptions = {}):
     }
   }
 
-  const serveBypass = async (
-    req: ExpressRequestLike,
-    res: ExpressResponseLike,
-    next: ExpressNextFunctionLike,
-    diagnostic: 'BYPASS' | 'RETRY' = 'BYPASS',
-  ) => {
-    if (includeHeaders || diagnostic === 'RETRY') res.set('X-Cache', diagnostic)
-    if (!loader) return next()
-    try {
-      return res.send(await loader(req))
-    } catch (error) {
-      return next(error)
+  const middleware = async (req: any, res: ExpressResponseLike, next: ExpressNextFunctionLike) => {
+    const { loadOnce, wait, remaining } = createHttpLoader(
+      () => loader!(req),
+      cacheInstance.resolveLoadTimeoutMs(options),
+    )
+    const serveBypass = async (diagnostic: 'BYPASS' | 'RETRY' = 'BYPASS') => {
+      if (includeHeaders || diagnostic === 'RETRY') res.set('X-Cache', diagnostic)
+      if (!loader) return next()
+      try {
+        return res.send(await wait(loadOnce))
+      } catch (error) {
+        return next(unwrapHttpSourceError(error))
+      }
     }
-  }
-
-  const middleware = async (req: ExpressRequestLike, res: ExpressResponseLike, next: ExpressNextFunctionLike) => {
     if (req.method && req.method.toUpperCase() !== 'GET') return next()
-    if (owned && closed) return serveBypass(req, res, next)
+    if (owned && closed) return serveBypass()
 
     let requestEligible: boolean
     try {
       requestEligible = isRequestCacheable(req, options)
     } catch (error) {
       cacheInstance.logger.error('adaptiveCache request policy failed:', error)
-      return serveBypass(req, res, next, 'RETRY')
+      return serveBypass('RETRY')
     }
     if (!requestEligible) {
-      return serveBypass(req, res, next)
+      return serveBypass()
     }
 
     const overrideCache = req.query?.refresh === 'true' || forceRefresh
@@ -183,14 +192,16 @@ export const adaptiveExpressCache = (options: AdaptiveExpressCacheOptions = {}):
 
     try {
       const adaptiveCacheKey = requestCacheKey(req)
-      if (!adaptiveCacheKey) return serveBypass(req, res, next)
+      if (!adaptiveCacheKey) return serveBypass()
 
       if (loader) {
-        let existing = overrideCache ? null : await cacheInstance.get(adaptiveCacheKey, { allowStale: true })
+        let existing = overrideCache
+          ? null
+          : await wait(() => cacheInstance.get(adaptiveCacheKey, { allowStale: true }))
         if (existing) {
           const cached = decodeHttpResponse(existing.data)
           if (!responseCacheable(req, cachedResponseView(cached))) {
-            await cacheInstance.clear(adaptiveCacheKey)
+            await wait(() => cacheInstance.clear(adaptiveCacheKey))
             existing = null
           } else if (!existing.stale) {
             if (includeHeaders) {
@@ -221,6 +232,7 @@ export const adaptiveExpressCache = (options: AdaptiveExpressCacheOptions = {}):
           isNegative: (data) => decodeHttpResponse(data).statusCode === 404,
           forceRefresh: overrideCache,
           lockWaitTimeoutMs: options.lockWaitTimeoutMs,
+          loadTimeoutMs: remaining(),
           shouldStore: (data: unknown) =>
             loaderBodyCacheable &&
             loaderStoreAllowed &&
@@ -229,9 +241,10 @@ export const adaptiveExpressCache = (options: AdaptiveExpressCacheOptions = {}):
         const value = await cacheInstance.getOrSet(
           adaptiveCacheKey,
           async () => {
-            const body = await loader(req)
+            const body = await loadOnce()
             loadedThisRequest = true
             loaderBodyCacheable = isCacheableHttpBody(body)
+            if (!loaderBodyCacheable) return UNSHAREABLE_HTTP_RESULT
             loaderStoreAllowed = responseCacheable(req, loaderResponse)
             return encodeHttpResponse(
               body,
@@ -242,10 +255,11 @@ export const adaptiveExpressCache = (options: AdaptiveExpressCacheOptions = {}):
           },
           loadOptions,
         )
+        if (value === UNSHAREABLE_HTTP_RESULT) return res.send(await wait(loadOnce))
         const response = decodeHttpResponse(value)
         if (!responseCacheable(req, cachedResponseView(response)) && !loadedThisRequest) {
-          await cacheInstance.clear(adaptiveCacheKey)
-          return res.send(await loader(req))
+          await wait(() => cacheInstance.clear(adaptiveCacheKey))
+          return res.send(await wait(loadOnce))
         }
         if (response.statusCode) res.statusCode = response.statusCode
         setCachedHeaders(res, response.headers)
@@ -284,9 +298,10 @@ export const adaptiveExpressCache = (options: AdaptiveExpressCacheOptions = {}):
 
       res.send = function (body: any) {
         res.send = originalSend
+        body = normalizeHttpBody(body)
         const originalContentEncoding = res.getHeader?.('content-encoding')
         const sent = originalSend.call(res, body)
-        if (!responseCacheable(req, res)) return sent
+        if (!isCacheableHttpBody(body) || !responseCacheable(req, res)) return sent
 
         const responseHeaders = { ...res.getHeaders?.() }
         for (const name of Object.keys(responseHeaders)) {
@@ -313,9 +328,15 @@ export const adaptiveExpressCache = (options: AdaptiveExpressCacheOptions = {}):
 
       return next()
     } catch (error) {
+      if (error instanceof HttpSourceError || isHttpLoadCancellation(error)) return next(unwrapHttpSourceError(error))
       cacheInstance.logger.error('adaptiveCache failed:', error)
       res.set('X-Cache', 'RETRY')
-      return next(loader ? error : undefined)
+      if (!loader) return next()
+      try {
+        return originalSend.call(res, await wait(loadOnce))
+      } catch (sourceError) {
+        return next(unwrapHttpSourceError(sourceError))
+      }
     }
   }
 
@@ -327,9 +348,16 @@ export const clearAdaptiveCache = async (
   querystring: any,
   redisPrefix = 'adaptive:',
   options: AdaptiveCacheOptions = {},
+  authority?: string,
 ) => {
   const cachePrefix = options.keyPrefix || redisPrefix
-  const adaptiveCacheKey = getAdaptiveCacheKey(requestPath, querystring, cachePrefix, options.ignoreQueryParams)
+  const adaptiveCacheKey = getAdaptiveCacheKey(
+    requestPath,
+    querystring,
+    cachePrefix,
+    options.ignoreQueryParams,
+    authority,
+  )
   const needsScopedWrapper = Boolean(options.backend) || cachePrefix !== 'adaptive:'
   const cache = needsScopedWrapper
     ? new AdaptiveCache(

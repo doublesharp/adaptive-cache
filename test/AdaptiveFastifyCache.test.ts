@@ -1,12 +1,22 @@
-import { describe, it, expect, beforeAll, afterAll, vi, beforeEach } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll, vi, beforeEach, afterEach } from 'vitest'
 import { GenericContainer, StartedTestContainer } from 'testcontainers'
 import Fastify from 'fastify'
 import Redis from 'ioredis'
-import { getAdaptiveCacheKey } from '../src/utils'
+import { getAdaptiveCacheKey as baseAdaptiveCacheKey } from '../src/utils'
 
 let cacheModule: typeof import('../src')
 let redisClient: Redis
 let container: StartedTestContainer
+
+const adapters: ReturnType<typeof cacheModule.adaptiveFastifyCache>[] = []
+const makeAdapter = (...args: Parameters<typeof cacheModule.adaptiveFastifyCache>) => {
+  const adapter = cacheModule.adaptiveFastifyCache(...args)
+  adapters.push(adapter)
+  return adapter
+}
+
+const getAdaptiveCacheKey = (...args: Parameters<typeof baseAdaptiveCacheKey>) =>
+  baseAdaptiveCacheKey(args[0], args[1], args[2], args[3], 'localhost:80')
 
 describe('Adaptive Fastify Cache', () => {
   beforeAll(async () => {
@@ -27,6 +37,11 @@ describe('Adaptive Fastify Cache', () => {
     if (container) await container.stop()
   })
 
+  afterEach(async () => {
+    vi.restoreAllMocks()
+    await Promise.all(adapters.splice(0).map((adapter) => adapter.close()))
+  })
+
   beforeEach(async () => {
     await redisClient.flushall()
     vi.restoreAllMocks()
@@ -36,7 +51,7 @@ describe('Adaptive Fastify Cache', () => {
     const fastify = Fastify()
     let callCount = 0
 
-    fastify.register(cacheModule.adaptiveFastifyCache(cacheModule.cache('10 seconds')))
+    await fastify.register(makeAdapter(cacheModule.cache('10 seconds')))
 
     fastify.get('/test', async () => {
       callCount++
@@ -60,7 +75,7 @@ describe('Adaptive Fastify Cache', () => {
 
   it('should support tags', async () => {
     const fastify = Fastify()
-    fastify.register(cacheModule.adaptiveFastifyCache({ tags: ['fastify-tag'] }))
+    await fastify.register(makeAdapter({ tags: ['fastify-tag'] }))
 
     fastify.get('/tags', async () => {
       return { ok: true }
@@ -69,7 +84,7 @@ describe('Adaptive Fastify Cache', () => {
     await fastify.inject({ method: 'GET', url: '/tags' })
     await new Promise((r) => setTimeout(r, 100))
 
-    const members = await redisClient.smembers('adaptive:tag:fastify-tag')
+    const members = await redisClient.zrange('adaptive:__adaptive:tag-index:fastify-tag', 0, -1)
     expect(members.length).toBe(1)
   })
 
@@ -77,7 +92,7 @@ describe('Adaptive Fastify Cache', () => {
     const fastify = Fastify()
     let callCount = 0
 
-    fastify.register(cacheModule.adaptiveFastifyCache())
+    await fastify.register(makeAdapter())
 
     fastify.get('/query', async (req) => {
       callCount++
@@ -98,7 +113,7 @@ describe('Adaptive Fastify Cache', () => {
     const fastify = Fastify()
     let callCount = 0
 
-    fastify.register(cacheModule.adaptiveFastifyCache())
+    await fastify.register(makeAdapter())
 
     fastify.get('/refresh', async () => {
       callCount++
@@ -121,8 +136,8 @@ describe('Adaptive Fastify Cache', () => {
   it('should cap the actual stored TTL using the parsed JSON payload', async () => {
     const fastify = Fastify()
     const maxTTL = vi.fn((body) => body.ttl)
-    const plugin = cacheModule.adaptiveFastifyCache({ initialTTL: 30, maxTTL })
-    fastify.register(plugin)
+    const plugin = makeAdapter({ initialTTL: 30, maxTTL })
+    await fastify.register(plugin)
     fastify.get('/maxttl', async () => ({ ttl: 20 }))
     try {
       expect((await fastify.inject('/maxttl')).statusCode).toBe(200)
@@ -142,7 +157,7 @@ describe('Adaptive Fastify Cache', () => {
     const fastify = Fastify()
     let callCount = 0
 
-    fastify.register(cacheModule.adaptiveFastifyCache({ initialTTL: 10 }))
+    await fastify.register(makeAdapter({ initialTTL: 10 }))
 
     fastify.get('/zero-response', async () => {
       callCount++
@@ -162,7 +177,7 @@ describe('Adaptive Fastify Cache', () => {
     const fastify = Fastify()
     let callCount = 0
 
-    fastify.register(cacheModule.adaptiveFastifyCache({ initialTTL: 10 }))
+    await fastify.register(makeAdapter({ initialTTL: 10 }))
 
     fastify.get('/plain-text', async (_req, reply) => {
       callCount++
@@ -182,8 +197,8 @@ describe('Adaptive Fastify Cache', () => {
 
   it('should use default maxTTL if function returns undefined', async () => {
     const fastify = Fastify()
-    fastify.register(
-      cacheModule.adaptiveFastifyCache({
+    await fastify.register(
+      makeAdapter({
         maxTTL: () => undefined,
         initialTTL: 2000,
       }),
@@ -203,10 +218,11 @@ describe('Adaptive Fastify Cache', () => {
     const errorSpy = vi.spyOn(Logger.prototype, 'error')
 
     const fastify = Fastify()
+    const adapter = makeAdapter()
     // Mock adaptiveCacheUpdate to throw
-    vi.spyOn(cacheModule.getDefaultCache().client, 'adaptiveCacheUpdate').mockRejectedValue(new Error('Update failed'))
+    vi.spyOn(adapter.cache.client, 'adaptiveCacheUpdate').mockRejectedValue(new Error('Update failed'))
 
-    fastify.register(cacheModule.adaptiveFastifyCache())
+    await fastify.register(adapter)
 
     fastify.get('/update-fail', async () => {
       return { ok: true }
@@ -226,7 +242,7 @@ describe('Adaptive Fastify Cache', () => {
     // Mock get to throw
     vi.spyOn(cacheModule.AdaptiveCache.prototype, 'get').mockRejectedValue(new Error('Get failed'))
 
-    fastify.register(cacheModule.adaptiveFastifyCache())
+    await fastify.register(makeAdapter())
 
     fastify.get('/fetch-fail', async () => {
       return { ok: true }
@@ -239,7 +255,7 @@ describe('Adaptive Fastify Cache', () => {
 
   it('should respect includeHeaders: false', async () => {
     const fastify = Fastify()
-    fastify.register(cacheModule.adaptiveFastifyCache({ includeHeaders: false }))
+    await fastify.register(makeAdapter({ includeHeaders: false }))
 
     fastify.get('/no-headers', async () => {
       return { ok: true }
@@ -252,14 +268,14 @@ describe('Adaptive Fastify Cache', () => {
   it('should set default lock expiration', async () => {
     const spy = vi.spyOn(cacheModule.AdaptiveCache, 'setDefaultLockExpirationSeconds')
     const fastify = Fastify()
-    fastify.register(cacheModule.adaptiveFastifyCache({ lockExpirationSeconds: 99 }))
+    await fastify.register(makeAdapter({ lockExpirationSeconds: 99 }))
     expect(spy).toHaveBeenCalledWith(99)
   })
 
   it('should handle maxTTL as a function returning a value', async () => {
     const fastify = Fastify()
-    fastify.register(
-      cacheModule.adaptiveFastifyCache({
+    await fastify.register(
+      makeAdapter({
         maxTTL: (_body) => {
           return 123 // Return a specific TTL
         },
@@ -278,8 +294,8 @@ describe('Adaptive Fastify Cache', () => {
 
   it('should handle tags as a function', async () => {
     const fastify = Fastify()
-    fastify.register(
-      cacheModule.adaptiveFastifyCache({
+    await fastify.register(
+      makeAdapter({
         tags: (_req) => {
           return ['dynamic-tag']
         },
@@ -293,14 +309,14 @@ describe('Adaptive Fastify Cache', () => {
     await fastify.inject({ method: 'GET', url: '/tags-fn' })
     await new Promise((r) => setTimeout(r, 100))
 
-    const members = await redisClient.smembers('adaptive:tag:dynamic-tag')
+    const members = await redisClient.zrange('adaptive:__adaptive:tag-index:dynamic-tag', 0, -1)
     expect(members.length).toBe(1)
   })
 
   it('should handle invalid JSON payload when maxTTL is a function', async () => {
     const fastify = Fastify()
-    fastify.register(
-      cacheModule.adaptiveFastifyCache({
+    await fastify.register(
+      makeAdapter({
         maxTTL: () => 100,
       }),
     )
@@ -323,7 +339,7 @@ describe('Adaptive Fastify Cache', () => {
 
   it('should not cache non-success responses (status >= 300)', async () => {
     const fastify = Fastify()
-    fastify.register(cacheModule.adaptiveFastifyCache())
+    await fastify.register(makeAdapter())
 
     const spy = vi.spyOn(cacheModule.AdaptiveCache.prototype, 'set')
 
@@ -339,8 +355,8 @@ describe('Adaptive Fastify Cache', () => {
 
   it('should handle JSON parse error in onSend when maxTTL is function', async () => {
     const fastify = Fastify()
-    fastify.register(
-      cacheModule.adaptiveFastifyCache({
+    await fastify.register(
+      makeAdapter({
         maxTTL: () => 100,
       }),
     )
@@ -360,20 +376,21 @@ describe('Adaptive Fastify Cache', () => {
     })
   })
 
-  it('should handle onRequest failure (get throws)', async () => {
+  it('should handle route cache read failure (get throws)', async () => {
     const fastify = Fastify()
-    fastify.register(cacheModule.adaptiveFastifyCache())
+    await fastify.register(makeAdapter())
 
     // Mock get to throw
     vi.spyOn(cacheModule.AdaptiveCache.prototype, 'get').mockRejectedValue(new Error('Get failed'))
 
+    fastify.get('/fail', async () => ({ source: 'route' }))
     const res = await fastify.inject({ method: 'GET', url: '/fail' })
     expect(res.headers['x-cache']).toBe('RETRY')
   })
 
   it('should include debug headers when configured', async () => {
     const fastify = Fastify()
-    fastify.register(cacheModule.adaptiveFastifyCache({ includeDebugHeaders: true }))
+    await fastify.register(makeAdapter({ includeDebugHeaders: true }))
 
     fastify.get('/debug', async () => {
       return { ok: true }
@@ -396,7 +413,7 @@ describe('Adaptive Fastify Cache', () => {
 
   it('should respect includeHeaders: false on HIT', async () => {
     const fastify = Fastify()
-    fastify.register(cacheModule.adaptiveFastifyCache({ includeHeaders: false }))
+    await fastify.register(makeAdapter({ includeHeaders: false }))
 
     let calls = 0
     fastify.get('/no-headers-hit', async () => {
@@ -420,7 +437,7 @@ describe('Adaptive Fastify Cache', () => {
 
   it('should handle missing lastChanged in metadata', async () => {
     const fastify = Fastify()
-    fastify.register(cacheModule.adaptiveFastifyCache({ includeDebugHeaders: true }))
+    await fastify.register(makeAdapter({ includeDebugHeaders: true }))
 
     // Mock get to return metadata without lastChanged
     vi.spyOn(cacheModule.AdaptiveCache.prototype, 'get').mockResolvedValue({
@@ -445,7 +462,7 @@ describe('Adaptive Fastify Cache', () => {
   it('should handle invalid tags type', async () => {
     const fastify = Fastify()
     // @ts-expect-error invalid tags type
-    fastify.register(cacheModule.adaptiveFastifyCache({ tags: 'invalid' }))
+    await fastify.register(makeAdapter({ tags: 'invalid' }))
 
     fastify.get('/invalid-tags', async () => {
       return { ok: true }

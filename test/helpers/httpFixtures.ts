@@ -1,12 +1,15 @@
 import { AdaptiveCache } from '../../src/AdaptiveCache'
 import { encodeHttpResponse } from '../../src/httpResponse'
-import { getAdaptiveCacheKey } from '../../src/utils'
+import { getAdaptiveCacheKey as baseAdaptiveCacheKey } from '../../src/utils'
 import type {
   AdaptiveCacheBackend,
   AdaptiveCacheBackendFetchInput,
   AdaptiveCacheBackendUpdateInput,
   AdaptiveCacheFetchResult,
 } from '../../src/types'
+
+const getAdaptiveCacheKey = (...args: Parameters<typeof baseAdaptiveCacheKey>) =>
+  baseAdaptiveCacheKey(args[0], args[1], args[2], args[3], 'localhost:80')
 
 export class ControlledBackend implements AdaptiveCacheBackend {
   readonly name = 'custom' as const

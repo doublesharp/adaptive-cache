@@ -1,3 +1,5 @@
+import { normalizeHttpBody } from './httpPolicy'
+
 export type CachedHttpHeaders = Record<string, string | string[]>
 
 const REPLAYABLE_HEADERS = new Set([
@@ -27,14 +29,17 @@ export const encodeHttpResponse = (
   statusCode: number,
   contentType: unknown,
   headers: Record<string, unknown> = {},
-) => ({
-  __adaptiveCacheHttpResponse: 1,
-  statusCode,
-  contentType: typeof contentType === 'string' ? contentType : undefined,
-  headers: normalizeHeaders(headers, contentType),
-  isBuffer: Buffer.isBuffer(body),
-  body: Buffer.isBuffer(body) ? body.toString('base64') : body,
-})
+) => {
+  body = normalizeHttpBody(body)
+  return {
+    __adaptiveCacheHttpResponse: 1,
+    statusCode,
+    contentType: typeof contentType === 'string' ? contentType : undefined,
+    headers: normalizeHeaders(headers, contentType),
+    isBuffer: Buffer.isBuffer(body),
+    body: Buffer.isBuffer(body) ? body.toString('base64') : body,
+  }
+}
 
 export const decodeHttpResponse = (data: any) => {
   if (!data || data.__adaptiveCacheHttpResponse !== 1) return { body: data }

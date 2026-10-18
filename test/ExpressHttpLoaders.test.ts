@@ -4,13 +4,16 @@ import request from 'supertest'
 import { AdaptiveCache } from '../src/AdaptiveCache'
 import { adaptiveExpressCache } from '../src/AdaptiveExpressCache'
 import { encodeHttpResponse } from '../src/httpResponse'
-import { getAdaptiveCacheKey } from '../src/utils'
+import { getAdaptiveCacheKey as baseAdaptiveCacheKey } from '../src/utils'
 import {
   ControlledBackend,
   controlledCache,
   queueStaleThenUnsafeResponse,
   queueStaleThenLegacyResponse,
 } from './helpers/httpFixtures'
+
+const getAdaptiveCacheKey = (...args: Parameters<typeof baseAdaptiveCacheKey>) =>
+  baseAdaptiveCacheKey(args[0], args[1], args[2], args[3], 'localhost:80')
 
 describe('Express HTTP loaders', () => {
   it('serves stale loader data while explicit regeneration runs', async () => {
@@ -36,10 +39,10 @@ describe('Express HTTP loaders', () => {
     let handlerCalls = 0
     app.get('/loader', middleware, (_req, res) => res.json({ handler: ++handlerCalls }))
 
-    const first = await request(app).get('/loader')
+    const first = await request(app).get('/loader').set('Host', 'localhost:80')
     await middleware.flush()
     backend.staleKeys.add([...backend.entries.keys()][0])
-    const stale = await request(app).get('/loader')
+    const stale = await request(app).get('/loader').set('Host', 'localhost:80')
     await refreshHasStarted
 
     expect(first.body).toEqual({ version: 1 })
@@ -49,7 +52,7 @@ describe('Express HTTP loaders', () => {
 
     releaseRefresh()
     await middleware.flush()
-    const refreshed = await request(app).get('/loader')
+    const refreshed = await request(app).get('/loader').set('Host', 'localhost:80')
     expect(refreshed.body).toEqual({ version: 2 })
   })
 
@@ -67,9 +70,9 @@ describe('Express HTTP loaders', () => {
     })
     app.get('/loader-cookie', middleware)
 
-    await request(app).get('/loader-cookie')
+    await request(app).get('/loader-cookie').set('Host', 'localhost:80')
     await middleware.flush()
-    await request(app).get('/loader-cookie')
+    await request(app).get('/loader-cookie').set('Host', 'localhost:80')
 
     expect(loaderCalls).toBe(2)
     expect(backend.entries.size).toBe(0)
@@ -85,7 +88,7 @@ describe('Express HTTP loaders', () => {
     })
     app.get('/loader-ttl', middleware)
 
-    await request(app).get('/loader-ttl')
+    await request(app).get('/loader-ttl').set('Host', 'localhost:80')
     await middleware.flush()
 
     expect([...backend.entries.values()][0].ttl).toBe(17)
@@ -100,9 +103,9 @@ describe('Express HTTP loaders', () => {
     app.get('/injected-handler-cap', handlerMiddleware, (_req, res) => res.json({ source: 'handler' }))
     app.get('/injected-loader-cap', loaderMiddleware)
 
-    await request(app).get('/injected-handler-cap')
+    await request(app).get('/injected-handler-cap').set('Host', 'localhost:80')
     await handlerMiddleware.flush()
-    await request(app).get('/injected-loader-cap')
+    await request(app).get('/injected-loader-cap').set('Host', 'localhost:80')
 
     expect(backend.updateInputs.at(-2)?.maxTTL).toBe(2)
     expect(backend.updateInputs.at(-1)?.maxTTL).toBe(2)
@@ -122,7 +125,7 @@ describe('Express HTTP loaders', () => {
     const app = express()
     app.get('/forced-loader', middleware)
 
-    const response = await request(app).get('/forced-loader')
+    const response = await request(app).get('/forced-loader').set('Host', 'localhost:80')
 
     expect(response.body).toEqual({ source: 'new' })
     expect(response.headers['x-cache']).toBe('BYPASS')
@@ -143,8 +146,8 @@ describe('Express HTTP loaders', () => {
     const app = express()
     app.get('/quiet-loader', middleware)
 
-    await request(app).get('/quiet-loader')
-    const hit = await request(app).get('/quiet-loader')
+    await request(app).get('/quiet-loader').set('Host', 'localhost:80')
+    const hit = await request(app).get('/quiet-loader').set('Host', 'localhost:80')
 
     expect(hit.body).toEqual({ call: 1 })
     expect(hit.headers['x-cache']).toBeUndefined()
@@ -172,7 +175,7 @@ describe('Express HTTP loaders', () => {
     const app = express()
     app.get('/loader-policy', middleware)
 
-    const response = await request(app).get('/loader-policy')
+    const response = await request(app).get('/loader-policy').set('Host', 'localhost:80')
 
     expect(response.body).toEqual({ source: 'loader-1' })
     expect(loaderCalls).toBe(1)
@@ -190,7 +193,7 @@ describe('Express HTTP loaders', () => {
     const app = express()
     app.get('/loader-policy-race', middleware)
 
-    const response = await request(app).get('/loader-policy-race')
+    const response = await request(app).get('/loader-policy-race').set('Host', 'localhost:80')
 
     expect(response.body).toEqual({ source: 'loader-1' })
     expect(loaderCalls).toBe(1)
@@ -208,7 +211,7 @@ describe('Express HTTP loaders', () => {
     const app = express()
     app.get('/legacy-loader-race', middleware)
 
-    const response = await request(app).get('/legacy-loader-race')
+    const response = await request(app).get('/legacy-loader-race').set('Host', 'localhost:80')
 
     expect(response.status).toBe(200)
     expect(response.body).toEqual({ source: 'legacy-racer' })
@@ -222,7 +225,7 @@ describe('Express HTTP loaders', () => {
     const app = express()
     app.get('/legacy-loader-hit', middleware)
 
-    const response = await request(app).get('/legacy-loader-hit')
+    const response = await request(app).get('/legacy-loader-hit').set('Host', 'localhost:80')
 
     expect(response.status).toBe(200)
     expect(response.body).toEqual({ source: 'legacy-hit' })
@@ -250,11 +253,11 @@ describe('Express HTTP loaders', () => {
     const app = express()
     app.get('/loader-metadata', middleware)
 
-    const stale = await request(app).get('/loader-metadata')
+    const stale = await request(app).get('/loader-metadata').set('Host', 'localhost:80')
     await started
     releaseRefresh()
     await middleware.flush()
-    const refreshed = await request(app).get('/loader-metadata')
+    const refreshed = await request(app).get('/loader-metadata').set('Host', 'localhost:80')
 
     expect(stale.status).toBe(202)
     expect(stale.headers['content-language']).toBe('old')
@@ -278,14 +281,14 @@ describe('Express HTTP loaders', () => {
     })
     app.get('/loader-negative', middleware)
 
-    await request(app).get('/loader-negative')
+    await request(app).get('/loader-negative').set('Host', 'localhost:80')
     await middleware.flush()
 
     expect(backend.updateInputs.at(-1)?.maxTTL).toBe(1)
     expect(backend.updateInputs.at(-1)?.staleTTL).toBe(0)
   })
 
-  it('fails a loader explicitly when its backend cannot fence the load', async () => {
+  it('runs a loader without storage when its backend cannot fence the load', async () => {
     const { backend, cache } = controlledCache()
     Object.defineProperty(backend, 'captureWriteToken', { value: undefined })
     const middleware = adaptiveExpressCache({ cache, loader: async () => ({ unsafe: true }) })
@@ -293,9 +296,10 @@ describe('Express HTTP loaders', () => {
     let handlerCalls = 0
     app.get('/unsupported-loader', middleware, (_req, res) => res.json({ handler: ++handlerCalls }))
 
-    const response = await request(app).get('/unsupported-loader')
+    const response = await request(app).get('/unsupported-loader').set('Host', 'localhost:80')
 
-    expect(response.status).toBe(500)
+    expect(response.status).toBe(200)
+    expect(response.body).toEqual({ unsafe: true })
     expect(handlerCalls).toBe(0)
     expect(backend.entries.size).toBe(0)
   })
@@ -312,10 +316,10 @@ describe('Express HTTP loaders', () => {
     let handlerCalls = 0
     app.get('/loader-error', middleware, (_req, res) => res.json({ handler: ++handlerCalls }))
 
-    const response = await request(app).get('/loader-error')
+    const response = await request(app).get('/loader-error').set('Host', 'localhost:80')
 
     expect(response.status).toBe(500)
-    expect(response.headers['x-cache']).toBe('RETRY')
+    expect(response.headers['x-cache']).toBe('MISS')
     expect(handlerCalls).toBe(0)
     expect(backend.entries.size).toBe(0)
   })
@@ -328,8 +332,14 @@ describe('Express HTTP loaders', () => {
     const app = express()
     app.get('/bypass-loader', middleware, (_req, res) => res.json({ handler: ++handlerCalls }))
 
-    const first = await request(app).get('/bypass-loader').set('Authorization', 'Bearer secret')
-    const second = await request(app).get('/bypass-loader').set('Authorization', 'Bearer secret')
+    const first = await request(app)
+      .get('/bypass-loader')
+      .set('Host', 'localhost:80')
+      .set('Authorization', 'Bearer secret')
+    const second = await request(app)
+      .get('/bypass-loader')
+      .set('Host', 'localhost:80')
+      .set('Authorization', 'Bearer secret')
 
     expect(first.body).toEqual({ loader: 1 })
     expect(second.body).toEqual({ loader: 2 })
@@ -350,7 +360,10 @@ describe('Express HTTP loaders', () => {
     let handlerCalls = 0
     app.get('/bypass-loader-error', middleware, (_req, res) => res.json({ handler: ++handlerCalls }))
 
-    const response = await request(app).get('/bypass-loader-error').set('Authorization', 'Bearer secret')
+    const response = await request(app)
+      .get('/bypass-loader-error')
+      .set('Host', 'localhost:80')
+      .set('Authorization', 'Bearer secret')
 
     expect(response.status).toBe(500)
     expect(response.headers['x-cache']).toBe('BYPASS')
@@ -370,8 +383,8 @@ describe('Express HTTP loaders', () => {
     app.get('/closed-loader', middleware)
     await middleware.close()
 
-    const first = await request(app).get('/closed-loader')
-    const second = await request(app).get('/closed-loader')
+    const first = await request(app).get('/closed-loader').set('Host', 'localhost:80')
+    const second = await request(app).get('/closed-loader').set('Host', 'localhost:80')
 
     expect(first.status).toBe(200)
     expect(first.body).toEqual({ loader: 1 })

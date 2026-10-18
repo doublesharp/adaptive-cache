@@ -6,8 +6,11 @@ import zlib from 'node:zlib'
 import { adaptiveExpressCache, clearAdaptiveCache } from '../src/AdaptiveExpressCache'
 import { encodeHttpResponse } from '../src/httpResponse'
 import { getDefaultCache } from '../src/singleton'
-import { getAdaptiveCacheKey } from '../src/utils'
+import { getAdaptiveCacheKey as baseAdaptiveCacheKey } from '../src/utils'
 import { ControlledBackend, controlledCache } from './helpers/httpFixtures'
+
+const getAdaptiveCacheKey = (...args: Parameters<typeof baseAdaptiveCacheKey>) =>
+  baseAdaptiveCacheKey(args[0], args[1], args[2], args[3], 'localhost:80')
 
 describe('Express HTTP policy and lifecycle', () => {
   it('partitions a namespaced custom key by normalized declared headers', async () => {
@@ -26,13 +29,17 @@ describe('Express HTTP policy and lifecycle', () => {
       res.set('Vary', 'Accept-Language, X-Tenant').json({ calls, id: req.params.id })
     })
 
-    await request(app).get('/users/7').set('X-Tenant', 'a').set('Accept-Language', 'en')
+    await request(app).get('/users/7').set('Host', 'localhost:80').set('X-Tenant', 'a').set('Accept-Language', 'en')
     await middleware.flush()
-    await request(app).get('/users/7').set('X-Tenant', 'b').set('Accept-Language', 'en')
+    await request(app).get('/users/7').set('Host', 'localhost:80').set('X-Tenant', 'b').set('Accept-Language', 'en')
     await middleware.flush()
-    await request(app).get('/users/7').set('X-Tenant', 'a').set('Accept-Language', 'fr')
+    await request(app).get('/users/7').set('Host', 'localhost:80').set('X-Tenant', 'a').set('Accept-Language', 'fr')
     await middleware.flush()
-    const hit = await request(app).get('/users/7').set('X-Tenant', 'a').set('Accept-Language', 'en')
+    const hit = await request(app)
+      .get('/users/7')
+      .set('Host', 'localhost:80')
+      .set('X-Tenant', 'a')
+      .set('Accept-Language', 'en')
 
     expect(calls).toBe(3)
     expect(hit.headers['x-cache']).toBe('HIT')
@@ -56,11 +63,20 @@ describe('Express HTTP policy and lifecycle', () => {
     })
     app.get('/isolated', isolated, (_req, res) => res.json({ call: ++isolatedCalls }))
 
-    const firstDefault = await request(app).get('/default').set('Authorization', 'Bearer one')
-    const secondDefault = await request(app).get('/default').set('Authorization', 'Bearer one')
-    await request(app).get('/isolated').set('Authorization', 'Bearer one')
+    const firstDefault = await request(app)
+      .get('/default')
+      .set('Host', 'localhost:80')
+      .set('Authorization', 'Bearer one')
+    const secondDefault = await request(app)
+      .get('/default')
+      .set('Host', 'localhost:80')
+      .set('Authorization', 'Bearer one')
+    await request(app).get('/isolated').set('Host', 'localhost:80').set('Authorization', 'Bearer one')
     await isolated.flush()
-    const isolatedHit = await request(app).get('/isolated').set('Authorization', 'Bearer one')
+    const isolatedHit = await request(app)
+      .get('/isolated')
+      .set('Host', 'localhost:80')
+      .set('Authorization', 'Bearer one')
 
     expect(firstDefault.headers['x-cache']).toBe('BYPASS')
     expect(secondDefault.headers['x-cache']).toBe('BYPASS')
@@ -81,8 +97,8 @@ describe('Express HTTP policy and lifecycle', () => {
     })
     app.get('/missing-key', middleware, (_req, res) => res.json({ call: ++calls }))
 
-    const first = await request(app).get('/missing-key').set('Authorization', 'Bearer one')
-    const second = await request(app).get('/missing-key').set('Authorization', 'Bearer two')
+    const first = await request(app).get('/missing-key').set('Host', 'localhost:80').set('Authorization', 'Bearer one')
+    const second = await request(app).get('/missing-key').set('Host', 'localhost:80').set('Authorization', 'Bearer two')
 
     expect(first.body).toEqual({ call: 1 })
     expect(second.body).toEqual({ call: 2 })
@@ -105,11 +121,11 @@ describe('Express HTTP policy and lifecycle', () => {
       res.json({ calls })
     })
 
-    await request(app).get('/policy?cache=no')
-    await request(app).get('/policy?cache=no')
-    await request(app).get('/policy?response=skip')
+    await request(app).get('/policy?cache=no').set('Host', 'localhost:80')
+    await request(app).get('/policy?cache=no').set('Host', 'localhost:80')
+    await request(app).get('/policy?response=skip').set('Host', 'localhost:80')
     await middleware.flush()
-    await request(app).get('/policy?response=skip')
+    await request(app).get('/policy?response=skip').set('Host', 'localhost:80')
 
     expect(calls).toBe(4)
   })
@@ -130,9 +146,9 @@ describe('Express HTTP policy and lifecycle', () => {
       setUnsafeHeader(res).send(String(calls))
     })
 
-    await request(app).get('/unsafe')
+    await request(app).get('/unsafe').set('Host', 'localhost:80')
     await middleware.flush()
-    const second = await request(app).get('/unsafe')
+    const second = await request(app).get('/unsafe').set('Host', 'localhost:80')
 
     expect(calls).toBe(2)
     expect(second.headers['x-cache']).toBe('MISS')
@@ -149,12 +165,12 @@ describe('Express HTTP policy and lifecycle', () => {
     app.get('/without', normal, (_req, res) => res.status(404).json({ call: ++withoutCalls }))
     app.get('/with', negative, (_req, res) => res.status(404).json({ call: ++withCalls }))
 
-    await request(app).get('/without')
+    await request(app).get('/without').set('Host', 'localhost:80')
     await normal.flush()
-    await request(app).get('/without')
-    await request(app).get('/with')
+    await request(app).get('/without').set('Host', 'localhost:80')
+    await request(app).get('/with').set('Host', 'localhost:80')
     await negative.flush()
-    const hit = await request(app).get('/with')
+    const hit = await request(app).get('/with').set('Host', 'localhost:80')
 
     expect(withoutCalls).toBe(2)
     expect(withCalls).toBe(1)
@@ -171,7 +187,7 @@ describe('Express HTTP policy and lifecycle', () => {
     const app = express()
     app.get('/changed-response-policy', middleware, (_req, res) => res.json({ source: 'handler' }))
 
-    const response = await request(app).get('/changed-response-policy')
+    const response = await request(app).get('/changed-response-policy').set('Host', 'localhost:80')
 
     expect(response.body).toEqual({ source: 'handler' })
     expect(response.headers['x-cache']).toBe('MISS')
@@ -196,8 +212,8 @@ describe('Express HTTP policy and lifecycle', () => {
     let calls = 0
     app.get('/token-error', middleware, (_req, res) => res.json({ call: ++calls }))
 
-    await request(app).get('/token-error')
-    await request(app).get('/token-error')
+    await request(app).get('/token-error').set('Host', 'localhost:80')
+    await request(app).get('/token-error').set('Host', 'localhost:80')
 
     expect(calls).toBe(2)
     expect(backend.entries.size).toBe(0)
@@ -214,7 +230,7 @@ describe('Express HTTP policy and lifecycle', () => {
     const app = express()
     app.get('/policy-error', middleware, (_req, res) => res.json({ handler: true }))
 
-    const response = await request(app).get('/policy-error')
+    const response = await request(app).get('/policy-error').set('Host', 'localhost:80')
 
     expect(response.status).toBe(200)
     expect(response.body).toEqual({ handler: true })
@@ -238,7 +254,7 @@ describe('Express HTTP policy and lifecycle', () => {
       if (!res.headersSent) res.status(500).json({ failed: true })
     })
 
-    const response = await request(app).get('/response-policy-error')
+    const response = await request(app).get('/response-policy-error').set('Host', 'localhost:80')
 
     expect(response.status).toBe(200)
     expect(response.body).toEqual({ handler: true })
@@ -284,11 +300,11 @@ describe('Express HTTP policy and lifecycle', () => {
         .get('/fenced')
         .then((response) => response)
       await started
-      await clearAdaptiveCache('/fenced', {}, 'custom:')
+      await clearAdaptiveCache('/fenced', {}, 'custom:', {}, 'localhost:80')
       releaseHandler()
       await firstRequest
       await middleware.flush()
-      const afterClear = await request(app).get('/fenced')
+      const afterClear = await request(app).get('/fenced').set('Host', 'localhost:80')
 
       expect(calls).toBe(2)
       expect(afterClear.headers['x-cache']).toBe('MISS')
@@ -324,9 +340,9 @@ describe('Express HTTP policy and lifecycle', () => {
     let calls = 0
     app.get('/compressed', middleware, (_req, res) => res.type('text/plain').send(`body-${++calls}`))
 
-    const first = await request(app).get('/compressed').set('Accept-Encoding', 'gzip')
+    const first = await request(app).get('/compressed').set('Host', 'localhost:80').set('Accept-Encoding', 'gzip')
     await middleware.flush()
-    const hit = await request(app).get('/compressed').set('Accept-Encoding', 'gzip')
+    const hit = await request(app).get('/compressed').set('Host', 'localhost:80').set('Accept-Encoding', 'gzip')
 
     expect(first.text).toBe('body-1')
     expect(hit.text).toBe('body-1')
@@ -358,9 +374,9 @@ describe('Express HTTP policy and lifecycle', () => {
         .send(zlib.gzipSync(Buffer.from('precompressed')))
     })
 
-    const first = await request(app).get('/precompressed').set('Accept-Encoding', 'gzip')
+    const first = await request(app).get('/precompressed').set('Host', 'localhost:80').set('Accept-Encoding', 'gzip')
     await middleware.flush()
-    const hit = await request(app).get('/precompressed').set('Accept-Encoding', 'gzip')
+    const hit = await request(app).get('/precompressed').set('Host', 'localhost:80').set('Accept-Encoding', 'gzip')
 
     expect(first.text).toBe('precompressed')
     expect(hit.text).toBe('precompressed')

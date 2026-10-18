@@ -1,14 +1,24 @@
-import { describe, it, expect, beforeAll, afterAll, vi, beforeEach } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll, vi, beforeEach, afterEach } from 'vitest'
 import { GenericContainer, StartedTestContainer } from 'testcontainers'
 import express from 'express'
 import request from 'supertest'
 import Redis from 'ioredis'
-import { getAdaptiveCacheKey } from '../src/utils'
+import { getAdaptiveCacheKey as baseAdaptiveCacheKey } from '../src/utils'
 
 // We need to delay importing the cache module until Redis is ready and env vars are set
 let cacheModule: typeof import('../src')
 let redisClient: Redis
 let container: StartedTestContainer
+
+const adapters: ReturnType<typeof cacheModule.adaptiveExpressCache>[] = []
+const makeAdapter = (...args: Parameters<typeof cacheModule.adaptiveExpressCache>) => {
+  const adapter = cacheModule.adaptiveExpressCache(...args)
+  adapters.push(adapter)
+  return adapter
+}
+
+const getAdaptiveCacheKey = (...args: Parameters<typeof baseAdaptiveCacheKey>) =>
+  baseAdaptiveCacheKey(args[0], args[1], args[2], args[3], 'localhost:80')
 
 describe('Adaptive Express Cache', () => {
   beforeAll(async () => {
@@ -35,9 +45,29 @@ describe('Adaptive Express Cache', () => {
     }
   })
 
+  afterEach(async () => {
+    vi.restoreAllMocks()
+    await Promise.all(adapters.splice(0).map((adapter) => adapter.close()))
+  })
+
   beforeEach(async () => {
     await redisClient.flushall()
     vi.restoreAllMocks()
+  })
+
+  it('gives each owned adapter its own Redis connection and closes it independently', async () => {
+    const before = ((await redisClient.client('LIST')) as string).trim().split('\n').length
+    const first = makeAdapter()
+    const second = makeAdapter()
+    await Promise.all([first.cache.client.ping(), second.cache.client.ping()])
+    expect(first.cache.client).not.toBe(second.cache.client)
+    expect(((await redisClient.client('LIST')) as string).trim().split('\n').length).toBe(before + 2)
+    await first.close()
+    await vi.waitFor(() => expect(first.cache.client.status).toBe('end'))
+    expect(await second.cache.client.ping()).toBe('PONG')
+    await second.close()
+    await vi.waitFor(() => expect(second.cache.client.status).toBe('end'))
+    expect(((await redisClient.client('LIST')) as string).trim().split('\n').length).toBe(before)
   })
 
   describe('cache helper (success)', () => {
@@ -45,17 +75,17 @@ describe('Adaptive Express Cache', () => {
       const app = express()
       let callCount = 0
 
-      app.get('/test', cacheModule.adaptiveExpressCache(cacheModule.cache('10 seconds')), (req, res) => {
+      app.get('/test', makeAdapter(cacheModule.cache('10 seconds')), (req, res) => {
         callCount++
         res.json({ value: 'success' })
       })
 
       // First call
-      await request(app).get('/test').expect(200)
+      await request(app).get('/test').set('Host', 'localhost:80').expect(200)
       expect(callCount).toBe(1)
 
       // Second call (cached)
-      await request(app).get('/test').expect(200)
+      await request(app).get('/test').set('Host', 'localhost:80').expect(200)
       expect(callCount).toBe(1)
     })
 
@@ -63,15 +93,15 @@ describe('Adaptive Express Cache', () => {
       const app = express()
       let callCount = 0
 
-      app.get('/error', cacheModule.adaptiveExpressCache(cacheModule.cache('10 seconds')), (req, res) => {
+      app.get('/error', makeAdapter(cacheModule.cache('10 seconds')), (req, res) => {
         callCount++
         res.status(500).json({ error: 'fail' })
       })
 
-      await request(app).get('/error').expect(500)
+      await request(app).get('/error').set('Host', 'localhost:80').expect(500)
       expect(callCount).toBe(1)
 
-      await request(app).get('/error').expect(500)
+      await request(app).get('/error').set('Host', 'localhost:80').expect(500)
       expect(callCount).toBe(2)
     })
   })
@@ -81,25 +111,25 @@ describe('Adaptive Express Cache', () => {
       const app = express()
       let callCount = 0
 
-      app.get('/any', cacheModule.adaptiveExpressCache(cacheModule.cache('10 seconds')), (req, res) => {
+      app.get('/any', makeAdapter(cacheModule.cache('10 seconds')), (req, res) => {
         callCount++
         res.status(400).json({ value: 'bad request' })
       })
 
-      await request(app).get('/any').expect(400)
+      await request(app).get('/any').set('Host', 'localhost:80').expect(400)
       expect(callCount).toBe(1)
 
-      await request(app).get('/any').expect(400)
+      await request(app).get('/any').set('Host', 'localhost:80').expect(400)
       expect(callCount).toBe(2)
     })
 
     it('should fallback to default duration for invalid types', async () => {
       const app = express()
       // @ts-expect-error invalid duration type
-      app.get('/invalid-duration', cacheModule.adaptiveExpressCache(cacheModule.cache(true)), (req, res) => {
+      app.get('/invalid-duration', makeAdapter(cacheModule.cache(true)), (req, res) => {
         res.json({ ok: true })
       })
-      await request(app).get('/invalid-duration').expect(200)
+      await request(app).get('/invalid-duration').set('Host', 'localhost:80').expect(200)
       const key = getAdaptiveCacheKey('/invalid-duration', {}, 'adaptive:')
       await vi.waitFor(async () => expect((await redisClient.hgetall(key + 'meta')).dataTTL).toBe('5'))
     })
@@ -110,13 +140,13 @@ describe('Adaptive Express Cache', () => {
       const app = express()
       let callCount = 0
 
-      app.get('/adaptive', cacheModule.adaptiveExpressCache({ initialTTL: 10 }), (req, res) => {
+      app.get('/adaptive', makeAdapter({ initialTTL: 10 }), (req, res) => {
         callCount++
         res.json({ foo: 'bar' })
       })
 
       // First request (MISS)
-      const res1 = await request(app).get('/adaptive').expect(200)
+      const res1 = await request(app).get('/adaptive').set('Host', 'localhost:80').expect(200)
       expect(res1.headers['x-cache']).toBe('MISS')
       expect(callCount).toBe(1)
       expect(res1.body).toEqual({ foo: 'bar' })
@@ -125,7 +155,7 @@ describe('Adaptive Express Cache', () => {
       await new Promise((r) => setTimeout(r, 100))
 
       // Second request (HIT)
-      const res2 = await request(app).get('/adaptive').expect(200)
+      const res2 = await request(app).get('/adaptive').set('Host', 'localhost:80').expect(200)
       expect(res2.headers['x-cache']).toBe('HIT')
       expect(res2.headers['x-cache-ttl']).toBeDefined()
       expect(callCount).toBe(1)
@@ -134,14 +164,14 @@ describe('Adaptive Express Cache', () => {
 
     it('should support debug headers', async () => {
       const app = express()
-      app.get('/debug', cacheModule.adaptiveExpressCache({ includeDebugHeaders: true }), (req, res) => {
+      app.get('/debug', makeAdapter({ includeDebugHeaders: true }), (req, res) => {
         res.json({ debug: true })
       })
 
-      await request(app).get('/debug')
+      await request(app).get('/debug').set('Host', 'localhost:80')
       await new Promise((r) => setTimeout(r, 100))
 
-      const res2 = await request(app).get('/debug')
+      const res2 = await request(app).get('/debug').set('Host', 'localhost:80')
       expect(res2.headers['x-cache-data-ttl']).toBeDefined()
       expect(res2.headers['x-cache-last-modified']).toBeDefined()
       expect(res2.headers['x-cache-refreshed']).toBeDefined()
@@ -150,24 +180,24 @@ describe('Adaptive Express Cache', () => {
     it('should force refresh via query param', async () => {
       const app = express()
       let callCount = 0
-      app.get('/refresh', cacheModule.adaptiveExpressCache(), (req, res) => {
+      app.get('/refresh', makeAdapter(), (req, res) => {
         callCount++
         res.json({ count: callCount })
       })
 
-      await request(app).get('/refresh')
+      await request(app).get('/refresh').set('Host', 'localhost:80')
       await new Promise((r) => setTimeout(r, 100))
 
       // Normal hit
-      await request(app).get('/refresh')
+      await request(app).get('/refresh').set('Host', 'localhost:80')
       expect(callCount).toBe(1)
 
       // Force refresh
-      const res3 = await request(app).get('/refresh?refresh=true')
+      const res3 = await request(app).get('/refresh?refresh=true').set('Host', 'localhost:80')
       expect(res3.headers['x-cache']).toBe('BYPASS')
       expect(callCount).toBe(2)
 
-      const res4 = await request(app).get('/refresh')
+      const res4 = await request(app).get('/refresh').set('Host', 'localhost:80')
       expect(res4.headers['x-cache']).toBe('HIT')
       expect(res4.body).toEqual({ count: 2 })
       expect(callCount).toBe(2)
@@ -176,17 +206,17 @@ describe('Adaptive Express Cache', () => {
     it('should cap the actual stored TTL using the response body', async () => {
       const app = express()
       const maxTTL = vi.fn((body) => body.ttl)
-      const middleware = cacheModule.adaptiveExpressCache({ initialTTL: 30, maxTTL })
+      const middleware = makeAdapter({ initialTTL: 30, maxTTL })
       app.get('/maxttl', middleware, (_req, res) => res.json({ ttl: 20 }))
       try {
-        await request(app).get('/maxttl').expect(200)
+        await request(app).get('/maxttl').set('Host', 'localhost:80').expect(200)
         await middleware.flush()
         expect(maxTTL).toHaveBeenCalledWith({ ttl: 20 })
         const key = getAdaptiveCacheKey('/maxttl', {}, 'adaptive:')
         const ttl = await redisClient.ttl(key + 'data')
         expect(ttl).toBeGreaterThan(18)
         expect(ttl).toBeLessThanOrEqual(20)
-        expect((await request(app).get('/maxttl')).headers['x-cache']).toBe('HIT')
+        expect((await request(app).get('/maxttl').set('Host', 'localhost:80')).headers['x-cache']).toBe('HIT')
       } finally {
         await middleware.close()
       }
@@ -196,15 +226,15 @@ describe('Adaptive Express Cache', () => {
       const app = express()
       let callCount = 0
 
-      app.get('/false-response', cacheModule.adaptiveExpressCache({ initialTTL: 10 }), (req, res) => {
+      app.get('/false-response', makeAdapter({ initialTTL: 10 }), (req, res) => {
         callCount++
         res.json(false)
       })
 
-      await request(app).get('/false-response').expect(200)
+      await request(app).get('/false-response').set('Host', 'localhost:80').expect(200)
       await new Promise((r) => setTimeout(r, 100))
 
-      const res2 = await request(app).get('/false-response').expect(200)
+      const res2 = await request(app).get('/false-response').set('Host', 'localhost:80').expect(200)
       expect(res2.headers['x-cache']).toBe('HIT')
       expect(res2.body).toBe(false)
       expect(callCount).toBe(1)
@@ -214,78 +244,78 @@ describe('Adaptive Express Cache', () => {
       const app = express()
       let callCount = 0
 
-      app.get('/plain-text', cacheModule.adaptiveExpressCache({ initialTTL: 10 }), (_req, res) => {
+      app.get('/plain-text', makeAdapter({ initialTTL: 10 }), (_req, res) => {
         callCount++
         res.type('text/plain').send('plain text')
       })
 
-      await request(app).get('/plain-text').expect(200, 'plain text')
+      await request(app).get('/plain-text').set('Host', 'localhost:80').expect(200, 'plain text')
       await new Promise((r) => setTimeout(r, 100))
 
-      const res2 = await request(app).get('/plain-text').expect(200, 'plain text')
+      const res2 = await request(app).get('/plain-text').set('Host', 'localhost:80').expect(200, 'plain text')
       expect(res2.headers['x-cache']).toBe('HIT')
       expect(callCount).toBe(1)
     })
 
     it('should compress data by default', async () => {
       const app = express()
-      app.get('/compress', cacheModule.adaptiveExpressCache({ compress: true }), (req, res) => {
+      app.get('/compress', makeAdapter({ compress: true }), (req, res) => {
         res.json({ large: 'data'.repeat(100) })
       })
 
-      await request(app).get('/compress')
+      await request(app).get('/compress').set('Host', 'localhost:80')
       await new Promise((r) => setTimeout(r, 100))
 
-      const res2 = await request(app).get('/compress')
+      const res2 = await request(app).get('/compress').set('Host', 'localhost:80')
       expect(res2.headers['x-cache']).toBe('HIT')
       expect(res2.body.large).toBe('data'.repeat(100))
     })
 
     it('should handle compression disabled', async () => {
       const app = express()
-      app.get('/no-compress', cacheModule.adaptiveExpressCache({ compress: false }), (req, res) => {
+      app.get('/no-compress', makeAdapter({ compress: false }), (req, res) => {
         res.json({ data: 'raw' })
       })
 
-      await request(app).get('/no-compress')
+      await request(app).get('/no-compress').set('Host', 'localhost:80')
       await new Promise((r) => setTimeout(r, 100))
 
-      const res2 = await request(app).get('/no-compress')
+      const res2 = await request(app).get('/no-compress').set('Host', 'localhost:80')
       expect(res2.headers['x-cache']).toBe('HIT')
       expect(res2.body.data).toBe('raw')
     })
 
     it('should handle redis errors gracefully', async () => {
       const app = express()
+      const adapter = makeAdapter()
       // Mock adaptiveCacheFetch to throw
-      vi.spyOn(cacheModule.getDefaultCache().client, 'adaptiveCacheFetch').mockRejectedValueOnce(
-        new Error('Redis connection failed'),
-      )
+      vi.spyOn(adapter.cache.client, 'adaptiveCacheFetch').mockRejectedValueOnce(new Error('Redis connection failed'))
 
       let callCount = 0
-      app.get('/redis-error', cacheModule.adaptiveExpressCache(), (req, res) => {
+      app.get('/redis-error', adapter, (req, res) => {
         callCount++
         res.json({ ok: true })
       })
 
       // Should proceed to handler
-      await request(app).get('/redis-error').expect(200)
+      await request(app).get('/redis-error').set('Host', 'localhost:80').expect(200)
       expect(callCount).toBe(1)
     })
 
     it('should handle corrupted cache data', async () => {
       const app = express()
+      const adapter = makeAdapter()
       // Mock adaptiveCacheFetch to return corrupted data
-      vi.spyOn(cacheModule.getDefaultCache().client, 'adaptiveCacheFetch').mockResolvedValue(['not-gzipped-json', 10])
+      vi.spyOn(adapter.cache.client, 'adaptiveCacheFetch').mockResolvedValue(['not-gzipped-json', 10])
 
       let callCount = 0
-      app.get('/corrupt', cacheModule.adaptiveExpressCache(), (req, res) => {
+      app.get('/corrupt', adapter, (req, res) => {
         callCount++
         res.json({ ok: true })
       })
 
       // Should fall back to handler and set X-Cache: RETRY
-      const res = await request(app).get('/corrupt').expect(200)
+      const res = await request(app).get('/corrupt').set('Host', 'localhost:80').expect(200)
       expect(res.headers['x-cache']).toBe('RETRY')
       expect(callCount).toBe(1)
     })
@@ -295,17 +325,16 @@ describe('Adaptive Express Cache', () => {
       const errorSpy = vi.spyOn(Logger.prototype, 'error')
 
       const app = express()
+      const adapter = makeAdapter()
       // Mock adaptiveCacheUpdate to throw
-      vi.spyOn(cacheModule.getDefaultCache().client, 'adaptiveCacheUpdate').mockRejectedValue(
-        new Error('Update failed'),
-      )
+      vi.spyOn(adapter.cache.client, 'adaptiveCacheUpdate').mockRejectedValue(new Error('Update failed'))
 
-      app.get('/update-fail', cacheModule.adaptiveExpressCache(), (req, res) => {
+      app.get('/update-fail', adapter, (req, res) => {
         res.json({ ok: true })
       })
 
       // Should still return 200
-      await request(app).get('/update-fail').expect(200)
+      await request(app).get('/update-fail').set('Host', 'localhost:80').expect(200)
       await new Promise((r) => setTimeout(r, 100))
 
       expect(errorSpy).toHaveBeenCalledWith('Cache update failed:', expect.any(Error))
@@ -313,21 +342,21 @@ describe('Adaptive Express Cache', () => {
 
     it('should respect includeHeaders: false', async () => {
       const app = express()
-      app.get('/no-headers', cacheModule.adaptiveExpressCache({ includeHeaders: false }), (req, res) => {
+      app.get('/no-headers', makeAdapter({ includeHeaders: false }), (req, res) => {
         res.json({ ok: true })
       })
-      const res = await request(app).get('/no-headers').expect(200)
+      const res = await request(app).get('/no-headers').set('Host', 'localhost:80').expect(200)
       expect(res.headers['x-cache']).toBeUndefined()
     })
 
     it('should handle missing metadata with debug headers', async () => {
       const app = express()
-      app.get('/debug-missing', cacheModule.adaptiveExpressCache({ includeDebugHeaders: true }), (req, res) => {
+      app.get('/debug-missing', makeAdapter({ includeDebugHeaders: true }), (req, res) => {
         res.json({ debug: true })
       })
 
       // Populate cache
-      await request(app).get('/debug-missing')
+      await request(app).get('/debug-missing').set('Host', 'localhost:80')
       await new Promise((r) => setTimeout(r, 100))
 
       // Manually delete meta key
@@ -337,19 +366,19 @@ describe('Adaptive Express Cache', () => {
         await redisClient.del(...keys)
       }
 
-      const res2 = await request(app).get('/debug-missing')
+      const res2 = await request(app).get('/debug-missing').set('Host', 'localhost:80')
       expect(res2.headers['x-cache']).toBe('HIT')
       expect(res2.headers['x-cache-data-ttl']).toBeUndefined()
     })
 
     it('should handle missing lastChanged in metadata', async () => {
       const app = express()
-      app.get('/missing-last-changed', cacheModule.adaptiveExpressCache({ includeDebugHeaders: true }), (req, res) => {
+      app.get('/missing-last-changed', makeAdapter({ includeDebugHeaders: true }), (req, res) => {
         res.json({ ok: true })
       })
 
       // Populate cache
-      await request(app).get('/missing-last-changed')
+      await request(app).get('/missing-last-changed').set('Host', 'localhost:80')
       await new Promise((r) => setTimeout(r, 100))
 
       // Manually modify metadata to remove lastChanged
@@ -357,7 +386,7 @@ describe('Adaptive Express Cache', () => {
       expect(keys).toHaveLength(1)
       await redisClient.hdel(keys[0], 'lastChanged')
 
-      const res = await request(app).get('/missing-last-changed')
+      const res = await request(app).get('/missing-last-changed').set('Host', 'localhost:80')
       expect(res.headers['x-cache-last-modified']).toBe('unknown')
     })
 
@@ -365,7 +394,7 @@ describe('Adaptive Express Cache', () => {
       const app = express()
       app.get(
         '/maxttl-default',
-        cacheModule.adaptiveExpressCache({
+        makeAdapter({
           maxTTL: () => undefined,
           initialTTL: 2000,
         }),
@@ -373,7 +402,7 @@ describe('Adaptive Express Cache', () => {
           res.json({ ok: true })
         },
       )
-      await request(app).get('/maxttl-default').expect(200)
+      await request(app).get('/maxttl-default').set('Host', 'localhost:80').expect(200)
 
       const key = getAdaptiveCacheKey('/maxttl-default', {}, 'adaptive:')
       await vi.waitFor(async () => expect((await redisClient.hgetall(key + 'meta')).dataTTL).toBe('900'))
@@ -382,28 +411,28 @@ describe('Adaptive Express Cache', () => {
     it('should respect includeHeaders: false on HIT', async () => {
       const app = express()
       let calls = 0
-      app.get('/no-headers-hit', cacheModule.adaptiveExpressCache({ includeHeaders: false }), (req, res) => {
+      app.get('/no-headers-hit', makeAdapter({ includeHeaders: false }), (req, res) => {
         calls++
         res.json({ ok: true })
       })
       // Miss
-      await request(app).get('/no-headers-hit')
+      await request(app).get('/no-headers-hit').set('Host', 'localhost:80')
       await new Promise((r) => setTimeout(r, 100))
       // Hit
-      const res = await request(app).get('/no-headers-hit').expect(200)
+      const res = await request(app).get('/no-headers-hit').set('Host', 'localhost:80').expect(200)
       expect(res.headers['x-cache']).toBeUndefined()
       expect(calls).toBe(1)
     })
 
     it('should handle object body in res.send', async () => {
       const app = express()
-      app.get('/obj-send', cacheModule.adaptiveExpressCache(), (req, res) => {
+      app.get('/obj-send', makeAdapter(), (req, res) => {
         res.send({ data: 'obj' })
       })
 
-      await request(app).get('/obj-send').expect(200)
+      await request(app).get('/obj-send').set('Host', 'localhost:80').expect(200)
       await vi.waitFor(async () => {
-        const hit = await request(app).get('/obj-send')
+        const hit = await request(app).get('/obj-send').set('Host', 'localhost:80')
         expect(hit.headers['x-cache']).toBe('HIT')
         expect(hit.body).toEqual({ data: 'obj' })
       })
@@ -411,12 +440,12 @@ describe('Adaptive Express Cache', () => {
 
     it('should handle errors during cache hit response', async () => {
       const app = express()
-      app.get('/hit-error', cacheModule.adaptiveExpressCache(), (req, res) => {
+      app.get('/hit-error', makeAdapter(), (req, res) => {
         res.json({ ok: true })
       })
 
       // Populate cache
-      await request(app).get('/hit-error')
+      await request(app).get('/hit-error').set('Host', 'localhost:80')
       await new Promise((r) => setTimeout(r, 100))
 
       const app2 = express()
@@ -432,16 +461,16 @@ describe('Adaptive Express Cache', () => {
         next()
       })
 
-      app2.get('/hit-error-2', cacheModule.adaptiveExpressCache(), (req, res) => {
+      app2.get('/hit-error-2', makeAdapter(), (req, res) => {
         res.json({ ok: true })
       })
 
       // Populate
-      await request(app2).get('/hit-error-2')
+      await request(app2).get('/hit-error-2').set('Host', 'localhost:80')
       await new Promise((r) => setTimeout(r, 100))
 
       // Trigger error
-      const res = await request(app2).get('/hit-error-2').set('X-Trigger-Error', 'true')
+      const res = await request(app2).get('/hit-error-2').set('Host', 'localhost:80').set('X-Trigger-Error', 'true')
       expect(res.headers['x-cache']).toBe('RETRY')
       expect(res.status).toBe(200)
       expect(res.body).toEqual({ ok: true })
@@ -452,20 +481,20 @@ describe('Adaptive Express Cache', () => {
     it('should clear the cache', async () => {
       const app = express()
       let callCount = 0
-      app.get('/clear', cacheModule.adaptiveExpressCache(), (req, res) => {
+      app.get('/clear', makeAdapter(), (req, res) => {
         callCount++
         res.json({ val: 1 })
       })
 
-      await request(app).get('/clear')
+      await request(app).get('/clear').set('Host', 'localhost:80')
       await new Promise((r) => setTimeout(r, 100))
 
-      await request(app).get('/clear')
+      await request(app).get('/clear').set('Host', 'localhost:80')
       expect(callCount).toBe(1)
 
-      await cacheModule.clearAdaptiveCache('/clear', {}, 'adaptive:')
+      await cacheModule.clearAdaptiveCache('/clear', {}, 'adaptive:', {}, 'localhost:80')
 
-      await request(app).get('/clear')
+      await request(app).get('/clear').set('Host', 'localhost:80')
       expect(callCount).toBe(2)
     })
   })
@@ -473,17 +502,17 @@ describe('Adaptive Express Cache', () => {
   describe('Cache Tags Middleware', () => {
     it('should apply static tags from options', async () => {
       const app = express()
-      app.get('/static-tags', cacheModule.adaptiveExpressCache({ tags: ['static-tag'] }), (req, res) => {
+      app.get('/static-tags', makeAdapter({ tags: ['static-tag'] }), (req, res) => {
         res.json({ ok: true })
       })
 
-      await request(app).get('/static-tags').expect(200)
+      await request(app).get('/static-tags').set('Host', 'localhost:80').expect(200)
       await new Promise((r) => setTimeout(r, 100))
 
       // Check redis for tag
       // The key is constructed in middleware: adaptive:/static-tags:hash:
       // We need to find the key or check the tag set directly
-      const members = await redisClient.smembers('adaptive:tag:static-tag')
+      const members = await redisClient.zrange('adaptive:__adaptive:tag-index:static-tag', 0, -1)
       expect(members.length).toBe(1)
       expect(members[0]).toContain('/static-tags')
     })
@@ -492,7 +521,7 @@ describe('Adaptive Express Cache', () => {
       const app = express()
       app.get(
         '/dynamic-tags/:id',
-        cacheModule.adaptiveExpressCache({
+        makeAdapter({
           tags: (req) => [`user:${req.params.id}`],
         }),
         (req, res) => {
@@ -500,10 +529,10 @@ describe('Adaptive Express Cache', () => {
         },
       )
 
-      await request(app).get('/dynamic-tags/123').expect(200)
+      await request(app).get('/dynamic-tags/123').set('Host', 'localhost:80').expect(200)
       await new Promise((r) => setTimeout(r, 100))
 
-      const members = await redisClient.smembers('adaptive:tag:user:123')
+      const members = await redisClient.zrange('adaptive:__adaptive:tag-index:user:123', 0, -1)
       expect(members.length).toBe(1)
     })
 
@@ -512,15 +541,15 @@ describe('Adaptive Express Cache', () => {
       app.get(
         '/invalid-tags',
         // @ts-expect-error invalid tags type
-        cacheModule.adaptiveExpressCache({ tags: 'not-an-array-or-function' }),
+        makeAdapter({ tags: 'not-an-array-or-function' }),
         (req, res) => {
           res.json({ ok: true })
         },
       )
 
-      await request(app).get('/invalid-tags').expect(200)
+      await request(app).get('/invalid-tags').set('Host', 'localhost:80').expect(200)
       await vi.waitFor(async () => {
-        const hit = await request(app).get('/invalid-tags')
+        const hit = await request(app).get('/invalid-tags').set('Host', 'localhost:80')
         expect(hit.headers['x-cache']).toBe('HIT')
         expect(hit.body).toEqual({ ok: true })
       })
@@ -532,7 +561,7 @@ describe('Adaptive Express Cache', () => {
 
     app.get(
       '/tags-fn',
-      cacheModule.adaptiveExpressCache({
+      makeAdapter({
         tags: (_req) => {
           return ['express-dynamic-tag']
         },
@@ -542,10 +571,10 @@ describe('Adaptive Express Cache', () => {
       },
     )
 
-    await request(app).get('/tags-fn')
+    await request(app).get('/tags-fn').set('Host', 'localhost:80')
     await new Promise((r) => setTimeout(r, 100))
 
-    const members = await redisClient.smembers('adaptive:tag:express-dynamic-tag')
+    const members = await redisClient.zrange('adaptive:__adaptive:tag-index:express-dynamic-tag', 0, -1)
     expect(members.length).toBe(1)
   })
 
@@ -553,16 +582,16 @@ describe('Adaptive Express Cache', () => {
     const app = express()
 
     // Call without arguments to trigger default parameter
-    app.get('/default-cache', cacheModule.adaptiveExpressCache(cacheModule.cache()), (req, res) => {
+    app.get('/default-cache', makeAdapter(cacheModule.cache()), (req, res) => {
       res.json({ ok: true })
     })
 
-    app.get('/default-cache-success', cacheModule.adaptiveExpressCache(cacheModule.cache()), (req, res) => {
+    app.get('/default-cache-success', makeAdapter(cacheModule.cache()), (req, res) => {
       res.json({ ok: true })
     })
 
-    await request(app).get('/default-cache').expect(200)
-    await request(app).get('/default-cache-success').expect(200)
+    await request(app).get('/default-cache').set('Host', 'localhost:80').expect(200)
+    await request(app).get('/default-cache-success').set('Host', 'localhost:80').expect(200)
     const key = getAdaptiveCacheKey('/default-cache', {}, 'adaptive:')
     await vi.waitFor(async () => expect((await redisClient.hgetall(key + 'meta')).dataTTL).toBe('5'))
   })

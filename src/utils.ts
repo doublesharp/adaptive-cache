@@ -55,6 +55,7 @@ export const getAdaptiveCacheKey = (
   querystring: any,
   redisPrefix: string,
   ignoreQueryParams?: string[],
+  authority?: string,
 ) => {
   const baseKey = requestPath + ':' // Remove query params from cache key
   const queryKey =
@@ -62,5 +63,9 @@ export const getAdaptiveCacheKey = (
       .createHash('sha256')
       .update(JSON.stringify(normalizeCacheQuery(querystring, ignoreQueryParams)))
       .digest('hex') + ':'
-  return redisPrefix + baseKey + queryKey
+  const authorityKey =
+    authority === undefined
+      ? ''
+      : `authority:${crypto.createHash('sha256').update(authority.trim().toLowerCase()).digest('hex')}:`
+  return redisPrefix + authorityKey + baseKey + queryKey
 }

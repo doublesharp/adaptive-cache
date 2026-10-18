@@ -66,7 +66,7 @@ const clearRequest = (headers: Record<string, string> = {}, query: Record<string
   originalUrl: '/resource?ignored=url',
   url: '/resource?ignored=url',
   query,
-  headers,
+  headers: { host: 'localhost:80', ...headers },
 })
 
 const createApp = async (framework: 'Express' | 'Fastify', options: Options, handler: Handler) => {
@@ -81,7 +81,7 @@ const createApp = async (framework: 'Express' | 'Fastify', options: Options, han
     return {
       adapter,
       send: async (url = '/resource', headers: Record<string, string> = {}) => {
-        const response = await request(app).get(url).set(headers)
+        const response = await request(app).get(url).set('Host', 'localhost:80').set(headers)
         return { status: response.status, body: response.text, headers: response.headers }
       },
       close: () => adapter.close(),
@@ -98,7 +98,7 @@ const createApp = async (framework: 'Express' | 'Fastify', options: Options, han
   return {
     adapter,
     send: async (url = '/resource', headers: Record<string, string> = {}) => {
-      const response = await app.inject({ url, headers })
+      const response = await app.inject({ url, headers: { host: 'localhost:80', ...headers } })
       return { status: response.statusCode, body: response.body, headers: response.headers }
     },
     close: () => app.close(),

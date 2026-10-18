@@ -22,7 +22,7 @@ const callExpress = async (
   query: Record<string, string> = {},
 ) => {
   const headers: Record<string, string> = {}
-  const req = { originalUrl: url, query }
+  const req = { originalUrl: url, query, headers: { host: 'localhost:80' } }
   const res = {
     statusCode: 200,
     body: undefined as any,
@@ -72,7 +72,7 @@ describe('Express clustered LRU middleware', () => {
     expect(bypass.headers['x-cache']).toBe('BYPASS')
     expect(bypass.body).toEqual({ calls: 2 })
 
-    await clearAdaptiveCache('/items', { q: '1' }, 'adaptive:', options)
+    await clearAdaptiveCache('/items', { q: '1' }, 'adaptive:', options, 'localhost:80')
 
     const afterClear = await callExpress(middleware, handler, '/items?q=1', { q: '1' })
     expect(afterClear.headers['x-cache']).toBe('MISS')

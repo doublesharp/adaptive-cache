@@ -137,7 +137,7 @@ describe('real HTTP middleware regressions', () => {
           res.status(203).type('text/plain').send('123')
         })
         get = async () => {
-          const res = await request(app).get('/text')
+          const res = await request(app).get('/text').set('Host', 'localhost:80')
           return { status: res.status, text: res.text, type: res.headers['content-type'], hit: res.headers['x-cache'] }
         }
       } else {
@@ -160,7 +160,7 @@ describe('real HTTP middleware regressions', () => {
       }
       const first = await get()
       await vi.waitFor(async () =>
-        expect(await cache.get(getAdaptiveCacheKey('/text', {}, 'adaptive:'))).not.toBeNull(),
+        expect(await cache.get(getAdaptiveCacheKey('/text', {}, 'adaptive:', undefined, 'localhost:80'))).not.toBeNull(),
       )
       const second = await get()
       expect(second.hit).toBe('HIT')
@@ -184,7 +184,7 @@ describe('real HTTP middleware regressions', () => {
         calls++
         res.send(body)
       })
-      get = async () => (await request(app).get('/binary')).body
+      get = async () => (await request(app).get('/binary').set('Host', 'localhost:80')).body
     } else {
       const app = Fastify()
       cleanups.push(() => app.close())
@@ -197,7 +197,7 @@ describe('real HTTP middleware regressions', () => {
     }
     expect(await get()).toEqual(body)
     await vi.waitFor(async () =>
-      expect(await cache.get(getAdaptiveCacheKey('/binary', {}, 'adaptive:'))).not.toBeNull(),
+      expect(await cache.get(getAdaptiveCacheKey('/binary', {}, 'adaptive:', undefined, 'localhost:80'))).not.toBeNull(),
     )
     expect(await get()).toEqual(body)
     expect(calls).toBe(1)
@@ -249,7 +249,7 @@ describe('real HTTP middleware regressions', () => {
     let calls = 0
     app.get('/hit', async () => ({ calls: ++calls }))
     await app.inject('/hit')
-    const key = getAdaptiveCacheKey('/hit', {}, 'adaptive:')
+    const key = getAdaptiveCacheKey('/hit', {}, 'adaptive:', undefined, 'localhost:80')
     await vi.waitFor(async () => expect(await cache.get(key)).not.toBeNull())
     const update = vi.spyOn(ClusteredLruAdaptiveCacheBackend.prototype, 'update')
     for (let i = 0; i < 3; i++) {
@@ -272,8 +272,8 @@ describe('real HTTP middleware regressions', () => {
         app.use(adaptiveExpressCache(config))
         app.get('/method', (_req, res) => res.send('get'))
         app.post('/method', (_req, res) => res.send('post'))
-        await request(app).get('/method')
-        post = async () => (await request(app).post('/method')).text
+        await request(app).get('/method').set('Host', 'localhost:80')
+        post = async () => (await request(app).post('/method').set('Host', 'localhost:80')).text
       } else {
         const app = Fastify()
         cleanups.push(() => app.close())
@@ -284,7 +284,7 @@ describe('real HTTP middleware regressions', () => {
         post = async () => (await app.inject({ method: 'POST', url: '/method' })).payload
       }
       await vi.waitFor(async () =>
-        expect(await cache.get(getAdaptiveCacheKey('/method', {}, 'adaptive:'))).not.toBeNull(),
+        expect(await cache.get(getAdaptiveCacheKey('/method', {}, 'adaptive:', undefined, 'localhost:80'))).not.toBeNull(),
       )
       expect(await post()).toBe('post')
     },

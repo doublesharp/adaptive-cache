@@ -117,25 +117,31 @@ describe('Adaptive cache end-to-end behavior', () => {
       },
     )
 
-    const first = await request(app).get('/products?sort=asc&filter=all').expect(200)
+    const first = await request(app).get('/products?sort=asc&filter=all').set('Host', 'localhost:80').expect(200)
     expect(first.headers['x-cache']).toBe('MISS')
     expect(first.body).toEqual({ callCount: 1, filter: 'all', sort: 'asc' })
 
     await waitFor(async () => {
-      expect((await redisClient.smembers(`${keyPrefix}tag:catalog`)).length).toBe(1)
+      expect((await redisClient.zrange(`${keyPrefix}__adaptive:tag-index:catalog`, 0, -1)).length).toBe(1)
     })
 
-    const canonicalHit = await request(app).get('/products?filter=all&sort=asc').expect(200)
+    const canonicalHit = await request(app).get('/products?filter=all&sort=asc').set('Host', 'localhost:80').expect(200)
     expect(canonicalHit.headers['x-cache']).toBe('HIT')
     expect(canonicalHit.headers['x-cache-data-ttl']).toBeDefined()
     expect(canonicalHit.body.callCount).toBe(1)
 
-    const refreshed = await request(app).get('/products?refresh=true&filter=all&sort=asc').expect(200)
+    const refreshed = await request(app)
+      .get('/products?refresh=true&filter=all&sort=asc')
+      .set('Host', 'localhost:80')
+      .expect(200)
     expect(refreshed.headers['x-cache']).toBe('BYPASS')
     expect(refreshed.body.callCount).toBe(2)
 
     await waitFor(async () => {
-      const postRefreshHit = await request(app).get('/products?sort=asc&filter=all').expect(200)
+      const postRefreshHit = await request(app)
+        .get('/products?sort=asc&filter=all')
+        .set('Host', 'localhost:80')
+        .expect(200)
       expect(postRefreshHit.headers['x-cache']).toBe('HIT')
       expect(postRefreshHit.body.callCount).toBe(2)
     })
@@ -143,7 +149,10 @@ describe('Adaptive cache end-to-end behavior', () => {
     const invalidator = new cacheModule.AdaptiveCache({ keyPrefix }, redisClient)
     await invalidator.invalidateTags(['catalog'])
 
-    const afterInvalidation = await request(app).get('/products?sort=asc&filter=all').expect(200)
+    const afterInvalidation = await request(app)
+      .get('/products?sort=asc&filter=all')
+      .set('Host', 'localhost:80')
+      .expect(200)
     expect(afterInvalidation.headers['x-cache']).toBe('MISS')
     expect(afterInvalidation.body.callCount).toBe(3)
   })
