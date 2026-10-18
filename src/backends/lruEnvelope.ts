@@ -22,6 +22,7 @@ export interface LruEnvelope {
   freshUntil?: number
   namespaceGeneration?: string
   prefix: string
+  revision?: string
   writeToken?: string
   epochs?: Record<string, string>
 }

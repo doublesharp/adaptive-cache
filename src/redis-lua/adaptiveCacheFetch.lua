@@ -3,6 +3,7 @@ local metaKey = string.gsub(dataKey, 'data$', 'meta')
 local data = redis.call('GET', dataKey)
 if not data then return {false, 0} end
 local freshUntil = nil
+local revision = false
 local marker = '@ac-redis:1:'
 if string.sub(data, 1, #marker) == marker then
   local envelope = cjson.decode(string.sub(data, #marker + 1))
@@ -10,6 +11,7 @@ if string.sub(data, 1, #marker) == marker then
   for key, epoch in pairs(envelope.epochs) do
     if redis.call('GET', key) ~= epoch then return {false, 0} end
   end
+  if envelope.revision and redis.call('GET', dataKey .. ':revision') == envelope.revision then revision = envelope.revision end
   freshUntil = envelope.freshUntil
   data = envelope.data
 else
@@ -32,4 +34,4 @@ if freshUntil then
   staleAge = math.max(0, -remaining)
 end
 local meta = redis.call('HMGET', metaKey, 'dataTTL', 'lastChanged', 'changeCount', 'hash')
-return {data, ttl, meta[1] or false, meta[2] or false, meta[3] or false, meta[4] or false, stale and 1 or 0, staleAge}
+return {data, ttl, meta[1] or false, meta[2] or false, meta[3] or false, meta[4] or false, stale and 1 or 0, staleAge, revision}

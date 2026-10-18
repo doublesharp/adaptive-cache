@@ -64,6 +64,8 @@ const shouldUseTls = (redisURL: string | undefined) =>
 const shouldRejectUnauthorizedTls = () =>
   process.env.REDIS_TLS_REJECT_UNAUTHORIZED !== 'false' && process.env.REDIS_INSECURE_TLS !== 'true'
 
+export type RevisionedFetchResult = AdaptiveCacheFetchResult & { revision?: string; freshUntil?: number }
+
 export class RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
   public readonly name = 'redis' as const
   public readonly supportsTtlPolicies = true
@@ -106,6 +108,8 @@ export class RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
       shouldRefreshCache: { numberOfKeys: 2, file: 'shouldRefreshCache.lua' },
       releaseCacheRefreshLock: { numberOfKeys: 2, file: 'releaseCacheRefreshLock.lua' },
       adaptiveCacheInvalidate: { numberOfKeys: 1, file: 'adaptiveCacheInvalidate.lua' },
+      adaptiveCacheValidate: { numberOfKeys: 1, file: 'adaptiveCacheValidate.lua' },
+      adaptiveCacheCleanup: { numberOfKeys: 1, file: 'adaptiveCacheCleanup.lua' },
     }
 
     for (const [name, config] of Object.entries(scripts)) {
@@ -118,8 +122,9 @@ export class RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
     }
   }
 
-  public async fetch(input: AdaptiveCacheBackendFetchInput): Promise<AdaptiveCacheFetchResult | null> {
-    const [cachedData, remainingTTL, dataTTL, lastChanged, changeCount, hash, stale, staleAge] = await (
+  public async fetch(input: AdaptiveCacheBackendFetchInput): Promise<RevisionedFetchResult | null> {
+    const fetchedAt = Date.now()
+    const [cachedData, remainingTTL, dataTTL, lastChanged, changeCount, hash, stale, staleAge, revision] = await (
       this.client as any
     ).adaptiveCacheFetch(input.dataKey, input.allowStale ? '1' : '0')
 
@@ -143,12 +148,19 @@ export class RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
 
     return {
       encodedData: cachedData,
+      revision: typeof revision === 'string' ? revision : undefined,
+      freshUntil: fetchedAt + remainingTTL * 1000,
       ttl: remainingTTL,
       metadata,
       stale: stale === 1,
       staleAge: Number(staleAge || 0) / 1000,
       layer: 'redis',
     }
+  }
+
+  public async validateRevision(dataKey: string, prefix: string, token: string, revision?: string) {
+    if (!revision) return false
+    return (await (this.client as any).adaptiveCacheValidate(dataKey, prefix, token, revision)) === 1
   }
 
   public async update(input: AdaptiveCacheBackendUpdateInput): Promise<AdaptiveCacheUpdateResult> {
@@ -214,7 +226,7 @@ export class RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
   }
 
   public async invalidateTags(tags: string[], redisPrefix: string): Promise<string[]> {
-    return (this.client as unknown as RedisFeatureCommands).adaptiveCacheInvalidate(
+    const detached = await (this.client as unknown as RedisFeatureCommands).adaptiveCacheInvalidate(
       '__adaptive:legacy-barrier',
       'tags',
       redisPrefix,
@@ -223,6 +235,68 @@ export class RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
       randomUUID(),
       randomUUID(),
     )
+    if (!detached.length) return []
+    const snapshots: Array<{ tag: string; indexKey: string; kind: string; remaining: number }> = []
+    for (let index = 0; index < detached.length; index += 4) {
+      const [tag, indexKey, kind, count] = detached.slice(index, index + 4)
+      snapshots.push({ tag, indexKey, kind, remaining: Number(count) })
+    }
+    const incomplete = () =>
+      new Error('Redis tag invalidation cleanup incomplete: detached snapshot expired or was evicted')
+    let renewalFailure: Error | undefined
+    // Renew every active snapshot, including those queued behind a stalled batch.
+    // If this process stops, renewal stops and the original 60s abandonment TTL applies.
+    const renewal = globalThis.setInterval(() => {
+      void Promise.all(
+        snapshots
+          .filter((snapshot) => snapshot.remaining > 0)
+          .map((snapshot) => this.client.pexpire(snapshot.indexKey, 60000)),
+      ).catch((cause) => {
+        renewalFailure = Object.assign(
+          new Error('Redis tag invalidation cleanup incomplete: detached snapshot renewal failed'),
+          { cause },
+        )
+      })
+    }, 10000)
+    renewal.unref()
+    const keys = new Set<string>()
+    try {
+      for (const snapshot of snapshots) {
+        const { tag, indexKey, kind } = snapshot
+        // No SMEMBERS or unbounded Lua member loop, including legacy indexes.
+        let cursor = '0'
+        while (snapshot.remaining > 0) {
+          if (renewalFailure) throw renewalFailure
+          let members: string[]
+          if (kind === 'zset') {
+            members = await this.client.zrange(indexKey, '0', '99')
+          } else {
+            const page = await this.client.sscan(indexKey, cursor, 'COUNT', '100')
+            cursor = page[0]
+            members = page[1]
+          }
+          if (!members.length && (kind === 'zset' || cursor === '0')) throw incomplete()
+          for (let offset = 0; offset < members.length; offset += 100) {
+            const batch = members.slice(offset, offset + 100)
+            const removed = await (this.client as any).adaptiveCacheCleanup(
+              indexKey,
+              redisPrefix,
+              tag,
+              JSON.stringify(batch),
+              kind,
+            )
+            if (removed < 0 || removed > snapshot.remaining) throw incomplete()
+            snapshot.remaining -= removed
+            batch.forEach((key) => keys.add(key))
+          }
+        }
+        await this.client.del(indexKey)
+      }
+      if (renewalFailure) throw renewalFailure
+      return [...keys]
+    } finally {
+      globalThis.clearInterval(renewal)
+    }
   }
 
   public async shouldRefresh(
@@ -252,8 +326,12 @@ export class RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
     return this.client.releaseCacheRefreshLock(lastUpdateKey, lockKey, currentTime, lockValue, recordRefresh ? 1 : 0)
   }
 
-  public async quit() {
+  public async quit(_preserveSharedCache = false, force = false) {
     if (this.ownsClient) {
+      if (force) {
+        this.client.disconnect()
+        return undefined
+      }
       return this.client.quit()
     }
     return undefined

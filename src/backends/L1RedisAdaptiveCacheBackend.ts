@@ -64,7 +64,14 @@ export class L1RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
   public async fetch(input: AdaptiveCacheBackendFetchInput) {
     const token = await this.redis.captureWriteToken(input.redisPrefix)
     const l1Result = await this.lru.fetch(input)
-    if (l1Result && l1Result.writeToken === token) return { ...l1Result, layer: 'l1' as const }
+    if (
+      l1Result &&
+      l1Result.writeToken === token &&
+      (await this.redis.validateRevision(input.dataKey, input.redisPrefix, token, l1Result.revision))
+    ) {
+      // Validation latency cannot extend the L1 lifetime.
+      if (!l1Result.freshUntil || l1Result.freshUntil > Date.now()) return { ...l1Result, layer: 'l1' as const }
+    }
     if (l1Result) await this.lru.deleteKeys([input.key])
 
     await this.subscriberReady
@@ -195,16 +202,18 @@ export class L1RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
     return this.redis.releaseLock(lastUpdateKey, currentTime, lockValue, recordRefresh)
   }
 
-  public async quit(preserveSharedCache = false) {
-    await this.flush()
+  public async quit(preserveSharedCache = false, force = false) {
+    if (!force) await this.flush()
 
     if (this.subscriber) {
-      await this.subscriber.quit()
+      if (force) this.subscriber.disconnect()
+      else await this.subscriber.quit()
       this.subscriber = undefined
     }
 
-    await this.lru.quit?.(preserveSharedCache)
-    await this.redis.quit?.()
+    // Disconnect first so a stalled local cache teardown cannot hold Redis open.
+    await this.redis.quit(preserveSharedCache, force)
+    await this.lru.quit(preserveSharedCache)
   }
 
   public async flush() {

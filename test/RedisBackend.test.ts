@@ -27,7 +27,7 @@ describe('RedisAdaptiveCacheBackend', () => {
 
     expect(update[0]).toBe('CACHED')
     expect(update[4]).toBe('hash-a')
-    expect(await redis.smembers('adaptive:tag:tag-a')).toEqual(['redis-key'])
+    expect(await redis.zrange('adaptive:__adaptive:tag-index:tag-a', 0, -1)).toEqual(['redis-key'])
 
     const hit = await backend.fetch({
       key: 'redis-key',
@@ -101,6 +101,8 @@ describe('RedisAdaptiveCacheBackend', () => {
       'shouldRefreshCache',
       'releaseCacheRefreshLock',
       'adaptiveCacheInvalidate',
+      'adaptiveCacheValidate',
+      'adaptiveCacheCleanup',
     ])
   })
 
@@ -119,6 +121,8 @@ describe('RedisAdaptiveCacheBackend', () => {
         'shouldRefreshCache.lua',
         'releaseCacheRefreshLock.lua',
         'adaptiveCacheInvalidate.lua',
+        'adaptiveCacheValidate.lua',
+        'adaptiveCacheCleanup.lua',
       ])
       expect(client.defineCommand).toHaveBeenCalledWith('adaptiveCacheInvalidate', {
         numberOfKeys: 1,

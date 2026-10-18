@@ -1,12 +1,17 @@
--- All mutation and index cleanup is atomic with the write barrier.
+-- Invalidation is O(number of requested tags), independent of member count.
 local prefix = ARGV[2]
 local barrier = prefix ~= '' and prefix .. '__adaptive:barrier' or KEYS[1]
 redis.call('SET', barrier, ARGV[5])
-local function remove(key)
-  local stateKey = key .. 'data:state'
-  local old = redis.call('HMGET', stateKey, 'prefix', 'tags')
+if ARGV[1] == 'namespace' then
+  redis.call('SET', prefix .. '__adaptive:namespace', ARGV[6])
+  return {}
+end
+if ARGV[1] == 'clear' then
+  local key = ARGV[3]
+  local dataKey = key .. 'data'
+  local old = redis.call('HMGET', dataKey .. ':state', 'prefix', 'tags')
   if not old[1] then
-    local data = redis.call('GET', key .. 'data')
+    local data = redis.call('GET', dataKey)
     local marker = '@ac-redis:1:'
     if data and string.sub(data, 1, #marker) == marker then
       local envelope = cjson.decode(string.sub(data, #marker + 1))
@@ -16,29 +21,30 @@ local function remove(key)
   if old[1] and old[2] then
     for _, tag in ipairs(cjson.decode(old[2])) do
       redis.call('SREM', old[1] .. 'tag:' .. tag, key)
+      redis.call('ZREM', old[1] .. '__adaptive:tag-index:' .. tag, key)
     end
   end
-  redis.call('DEL', key .. 'data', key .. 'meta', stateKey)
+  redis.call('DEL', dataKey, key .. 'meta', dataKey .. ':state', dataKey .. ':revision')
+  return {key}
 end
-if ARGV[1] == 'namespace' then
-  redis.call('SET', prefix .. '__adaptive:namespace', ARGV[6])
-  return {}
-end
-if ARGV[1] == 'clear' then
-  remove(ARGV[3])
-  return {ARGV[3]}
-end
-local keys = {}
-local seen = {}
-for _, tag in ipairs(cjson.decode(ARGV[4])) do
-  redis.call('DEL', prefix .. '__adaptive:tag-epoch:' .. tag)
-  for _, key in ipairs(redis.call('SMEMBERS', prefix .. 'tag:' .. tag)) do
-    if not seen[key] then
-      seen[key] = true
-      table.insert(keys, key)
-      remove(key)
+local detached = {}
+for index, tag in ipairs(cjson.decode(ARGV[4])) do
+  local epochKey = prefix .. '__adaptive:tag-epoch:' .. tag
+  redis.call('DEL', epochKey)
+  local indexKey = prefix .. '__adaptive:tag-index:' .. tag
+  local legacyKey = prefix .. 'tag:' .. tag
+  for _, source in ipairs({indexKey, legacyKey}) do
+    if redis.call('EXISTS', source) == 1 then
+      local target = source .. ':invalidated:' .. ARGV[6] .. ':' .. index
+      redis.call('RENAME', source, target)
+      -- Abandoned cleanup must not retain an index indefinitely.
+      redis.call('PEXPIRE', target, 60000)
+      table.insert(detached, tag)
+      table.insert(detached, target)
+      table.insert(detached, source == indexKey and 'zset' or 'set')
+      local count = source == indexKey and redis.call('ZCARD', target) or redis.call('SCARD', target)
+      table.insert(detached, tostring(count))
     end
   end
-  redis.call('DEL', prefix .. 'tag:' .. tag)
 end
-return keys
+return detached

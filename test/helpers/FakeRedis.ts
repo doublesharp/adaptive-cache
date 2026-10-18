@@ -17,6 +17,7 @@ export class FakeRedis {
     values: new Map<string, StoredValue>(),
     hashes: new Map<string, Record<string, string>>(),
     sets: new Map<string, Set<string>>(),
+    sortedSets: new Map<string, Map<string, number>>(),
   }
   public published: Array<{ channel: string; payload: string }> = []
   public subscribedChannels: string[] = []
@@ -27,6 +28,7 @@ export class FakeRedis {
   public failDuplicate = false
   public defineCommandCalls: string[] = []
   public quitCalls = 0
+  public disconnectCalls = 0
 
   constructor(stores?: FakeRedis['stores'] | Record<string, unknown> | string, options?: Record<string, unknown>) {
     if (typeof stores === 'string') {
@@ -115,12 +117,22 @@ export class FakeRedis {
       if (this.stores.values.delete(key)) deleted += 1
       if (this.stores.hashes.delete(key)) deleted += 1
       if (this.stores.sets.delete(key)) deleted += 1
+      if (this.stores.sortedSets.delete(key)) deleted += 1
     }
     return deleted
   }
 
+  async pexpire(_key: string, _milliseconds: number) {
+    return 1
+  }
+
   async exists(key: string) {
-    return this.stores.values.has(key) || this.stores.hashes.has(key) || this.stores.sets.has(key) ? 1 : 0
+    return this.stores.values.has(key) ||
+      this.stores.hashes.has(key) ||
+      this.stores.sets.has(key) ||
+      this.stores.sortedSets.has(key)
+      ? 1
+      : 0
   }
 
   async hgetall(key: string) {
@@ -131,10 +143,26 @@ export class FakeRedis {
     return Array.from(this.stores.sets.get(key) || [])
   }
 
+  async zrange(key: string, start: number, stop: number) {
+    const members = [...(this.stores.sortedSets.get(key) || [])].sort((a, b) => a[1] - b[1]).map(([member]) => member)
+    return members.slice(start, stop === -1 ? undefined : stop + 1)
+  }
+
+  async sscan(key: string, _cursor: string, _count: string, count: number): Promise<[string, string[]]> {
+    const members = await this.smembers(key)
+    return [members.length > count ? '1' : '0', members.slice(0, count)]
+  }
+
+  disconnect() {
+    this.disconnectCalls++
+    this.status = 'end'
+  }
+
   async flushall() {
     this.stores.values.clear()
     this.stores.hashes.clear()
     this.stores.sets.clear()
+    this.stores.sortedSets.clear()
   }
 
   async quit() {
@@ -183,10 +211,12 @@ export class FakeRedis {
     if (!data) return [null, 0]
     const meta = this.stores.hashes.get(dataKey.replace(/data$/, 'meta')) || {}
     let freshUntil: number | undefined
+    let revision: string | undefined
     if (data.startsWith('@ac-redis:1:')) {
       const envelope = JSON.parse(data.slice('@ac-redis:1:'.length))
       if (envelope.namespace !== (await this.get(envelope.prefix + '__adaptive:namespace'))) return [null, 0]
       for (const [key, epoch] of Object.entries(envelope.epochs)) if ((await this.get(key)) !== epoch) return [null, 0]
+      if (envelope.revision === (await this.get(dataKey + ':revision'))) revision = envelope.revision
       freshUntil = envelope.freshUntil
       data = envelope.data
     }
@@ -202,6 +232,7 @@ export class FakeRedis {
       meta.hash,
       stale ? 1 : 0,
       Math.max(0, -remaining),
+      revision,
     ]
   }
 
@@ -243,8 +274,10 @@ export class FakeRedis {
       const previous = JSON.parse(previousData.slice('@ac-redis:1:'.length))
       old = { prefix: previous.prefix, tags: JSON.stringify(previous.tags), generation: previous.namespace }
     }
-    for (const tag of JSON.parse(old?.tags || '[]'))
+    for (const tag of JSON.parse(old?.tags || '[]')) {
       this.stores.sets.get((old?.prefix || '') + 'tag:' + tag)?.delete(key)
+      this.stores.sortedSets.get((old?.prefix || '') + '__adaptive:tag-index:' + tag)?.delete(key)
+    }
     const generation = storedGeneration || uuid
     await this.setnx(prefix + '__adaptive:namespace', generation)
     if (old && old.generation !== generation) this.stores.hashes.delete(metaKey)
@@ -258,10 +291,6 @@ export class FakeRedis {
         epoch.expiresAt || 0,
         Date.now() + Math.max(Number(metaTTLString), Number(maxTTLString) + Number(staleTTLString)) * 1000,
       )
-      const tagKey = prefix + 'tag:' + tag
-      const members = this.stores.sets.get(tagKey) || new Set<string>()
-      members.add(key)
-      this.stores.sets.set(tagKey, members)
     }
 
     const initialTTL = Number(initialTTLString)
@@ -293,12 +322,24 @@ export class FakeRedis {
       tags: tagsJSON,
       generation,
       freshUntil: String(Date.now() + freshTTL * 1000),
+      revision: uuid,
     })
+    const retention = (freshTTL + Number(staleTTLString)) * 1000
+    for (const tag of JSON.parse(tagsJSON)) {
+      const tagKey = prefix + '__adaptive:tag-index:' + tag
+      const members = this.stores.sortedSets.get(tagKey) || new Map<string, number>()
+      let pruned = 0
+      for (const [member, expiry] of members) if (expiry <= Date.now() && pruned++ < 100) members.delete(member)
+      members.set(key, Date.now() + retention)
+      this.stores.sortedSets.set(tagKey, members)
+    }
+    await this.set(dataKey + ':revision', uuid, 'PX', retention)
     await this.set(
       dataKey,
       '@ac-redis:1:' +
         JSON.stringify({
           data,
+          revision: uuid,
           prefix,
           namespace: generation,
           freshUntil: Date.now() + freshTTL * 1000,
@@ -329,23 +370,81 @@ export class FakeRedis {
       await this.set(namespace, namespaceUUID)
       return []
     }
-    const keys = new Set<string>(operation === 'clear' ? [key] : [])
-    const tags: string[] = JSON.parse(tagsJSON)
-    for (const tag of tags) await this.del(prefix + '__adaptive:tag-epoch:' + tag)
-    for (const tag of tags) for (const member of await this.smembers(prefix + 'tag:' + tag)) keys.add(member)
-    for (const member of keys) {
-      let state = this.stores.hashes.get(member + 'data:state')
-      const data = await this.get(member + 'data')
-      if (!state && data?.startsWith('@ac-redis:1:')) {
-        const envelope = JSON.parse(data.slice('@ac-redis:1:'.length))
-        state = { prefix: envelope.prefix, tags: JSON.stringify(envelope.tags) }
-      }
-      for (const tag of JSON.parse(state?.tags || '[]'))
-        this.stores.sets.get((state?.prefix || '') + 'tag:' + tag)?.delete(member)
-      await this.del(member + 'data', member + 'meta', member + 'data:state')
+    if (operation === 'clear') {
+      await this.removeEntry(key)
+      return [key]
     }
-    for (const tag of tags) await this.del(prefix + 'tag:' + tag)
-    return [...keys]
+    const detached: string[] = []
+    for (const tag of JSON.parse(tagsJSON)) {
+      await this.del(prefix + '__adaptive:tag-epoch:' + tag)
+      for (const [source, kind] of [
+        [prefix + '__adaptive:tag-index:' + tag, 'zset'],
+        [prefix + 'tag:' + tag, 'set'],
+      ]) {
+        const target = source + ':invalidated:' + namespaceUUID
+        const store = kind === 'set' ? this.stores.sets : this.stores.sortedSets
+        const members = store.get(source)
+        if (members?.size) {
+          ;(store as Map<string, unknown>).set(target, members)
+          store.delete(source)
+          detached.push(tag, target, kind, String(members.size))
+        }
+      }
+    }
+    return detached
+  }
+
+  private async removeEntry(member: string) {
+    let state = this.stores.hashes.get(member + 'data:state')
+    const data = await this.get(member + 'data')
+    if (!state && data?.startsWith('@ac-redis:1:')) {
+      const envelope = JSON.parse(data.slice('@ac-redis:1:'.length))
+      state = { prefix: envelope.prefix, tags: JSON.stringify(envelope.tags) }
+    }
+    for (const tag of JSON.parse(state?.tags || '[]')) {
+      this.stores.sets.get((state?.prefix || '') + 'tag:' + tag)?.delete(member)
+      this.stores.sortedSets.get((state?.prefix || '') + '__adaptive:tag-index:' + tag)?.delete(member)
+    }
+    await this.del(member + 'data', member + 'meta', member + 'data:state', member + 'data:revision')
+  }
+
+  async adaptiveCacheCleanup(indexKey: string, prefix: string, tag: string, membersJSON: string, kind: string) {
+    if (!(await this.exists(indexKey))) return -1
+    let removed = 0
+    const epochKey = prefix + '__adaptive:tag-epoch:' + tag
+    const epoch = await this.get(epochKey)
+    for (const member of JSON.parse(membersJSON)) {
+      const data = await this.get(member + 'data')
+      let remove = true
+      if (data?.startsWith('@ac-redis:1:')) {
+        const envelope = JSON.parse(data.slice('@ac-redis:1:'.length))
+        remove = envelope.epochs[epochKey] !== undefined && envelope.epochs[epochKey] !== epoch
+      } else {
+        const state = this.stores.hashes.get(member + 'data:state')
+        if (state) remove = JSON.parse(state.tags).includes(tag)
+      }
+      if (remove) await this.removeEntry(member)
+      if (kind === 'zset') removed += this.stores.sortedSets.get(indexKey)?.delete(member) ? 1 : 0
+      else removed += this.stores.sets.get(indexKey)?.delete(member) ? 1 : 0
+    }
+    return removed
+  }
+
+  async adaptiveCacheValidate(dataKey: string, prefix: string, token: string, revision: string) {
+    if (!revision || (await this.get(dataKey + ':revision')) !== revision || !(await this.get(dataKey))) return 0
+    const controls = await this.mget(
+      '__adaptive:legacy-barrier',
+      prefix + '__adaptive:barrier',
+      prefix + '__adaptive:namespace',
+    )
+    if (controls.some((value) => value === null) || controls.join(':') !== token) return 0
+    const data = (await this.get(dataKey))!
+    if (!data.startsWith('@ac-redis:1:')) return 0
+    const envelope = JSON.parse(data.slice('@ac-redis:1:'.length))
+    if (envelope.revision !== revision || envelope.prefix !== prefix || envelope.namespace !== controls[2]) return 0
+    for (const [key, epoch] of Object.entries(envelope.epochs)) if ((await this.get(key)) !== epoch) return 0
+    if (envelope.freshUntil <= Date.now()) return 0
+    return 1
   }
 
   async shouldRefreshCache(

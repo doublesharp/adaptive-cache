@@ -79,7 +79,7 @@ describe('L1RedisAdaptiveCacheBackend', () => {
     await backend.quit()
   })
 
-  it('should keep conservative L1 data when Redis async update fails', async () => {
+  it('should fall through unconfirmed L1 data when Redis async update fails', async () => {
     const redis = new FakeRedis()
     const redisBackend = new RedisAdaptiveCacheBackend(redis as any, logger())
     const lru = new ClusteredLruAdaptiveCacheBackend(
@@ -110,7 +110,7 @@ describe('L1RedisAdaptiveCacheBackend', () => {
       redisPrefix: 'adaptive:',
       includeDebugHeaders: true,
     })
-    expect(hit?.metadata?.hash).toBe('hash-fail')
+    expect(hit).toBeNull()
 
     await backend.quit()
   })
@@ -294,6 +294,19 @@ describe('L1RedisAdaptiveCacheBackend', () => {
       tags: [],
     })
 
+    await redisBackend.update({
+      key: 'message-key',
+      dataKey: 'message-keydata',
+      metaKey: 'message-keymeta',
+      redisPrefix: 'adaptive:',
+      encodedData: 'confirmed',
+      responseHash: 'hash-message',
+      initialTTL: 5,
+      maxTTL: 60,
+      ttlScaling: 2,
+      metaTTL: 100,
+      tags: [],
+    })
     expect(
       await backend.fetch({
         key: 'message-key',
@@ -303,6 +316,7 @@ describe('L1RedisAdaptiveCacheBackend', () => {
         includeDebugHeaders: true,
       }),
     ).not.toBeNull()
+    await redis.del('message-keydata')
     ;(backend as any).handleInvalidation('not-json')
     ;(backend as any).handleInvalidation(JSON.stringify({ source: (backend as any).sourceId, keys: ['message-key'] }))
     ;(backend as any).handleInvalidation(JSON.stringify({ source: 'external', keys: ['message-key'] }))

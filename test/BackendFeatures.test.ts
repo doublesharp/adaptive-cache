@@ -100,7 +100,7 @@ describe('Backend feature guarantees', () => {
     expect((await redis.fetch(fetchInput()))?.encodedData).toBe('old')
     expect(await redis.fetch(fetchInput(input('a:other:')))).toBeNull()
     await redis.clear('a:k:', 'a:k:data', 'a:k:meta')
-    expect(await client.smembers('a:tag:blue')).toEqual([])
+    expect(await client.zrange('a:__adaptive:tag-index:blue', 0, -1)).toEqual([])
   })
 
   it('fails closed when Redis evicts namespace, barrier, state, or tag-index keys independently', async () => {
@@ -112,7 +112,7 @@ describe('Backend feature guarantees', () => {
     expect(replacement).not.toBe(original)
     expect(await redis.update({ ...input(), writeToken: original })).toEqual(['INVALIDATED', 0])
     await redis.update({ ...input(), writeToken: replacement })
-    await client.del('a:k:data:state', 'a:tag:red')
+    await client.del('a:k:data:state', 'a:__adaptive:tag-index:red')
     await redis.invalidateTags(['red'], 'a:')
     expect(await redis.fetch(fetchInput())).toBeNull()
     const beforeEviction = await redis.captureWriteToken('a:')
@@ -125,12 +125,12 @@ describe('Backend feature guarantees', () => {
     await redis.update(input())
     await client.del(input().dataKey + ':state')
     await redis.update({ ...input(), tags: ['blue'] })
-    expect(await client.smembers('a:tag:red')).toEqual([])
+    expect(await client.zrange('a:__adaptive:tag-index:red', 0, -1)).toEqual([])
     await redis.invalidateTags(['red'], 'a:')
     expect(await redis.fetch(fetchInput())).not.toBeNull()
     await client.del(input().dataKey + ':state')
     await redis.clear(input().key, input().dataKey, input().metaKey, 'a:')
-    expect(await client.smembers('a:tag:blue')).toEqual([])
+    expect(await client.zrange('a:__adaptive:tag-index:blue', 0, -1)).toEqual([])
   })
 
   it('bounds tag-epoch retention and does not create epochs for unknown invalidated tags', async () => {
@@ -391,7 +391,7 @@ describe('Clustered LRU feature guarantees', () => {
       await backend.update(input())
       await backend.clear('a:k:', 'a:k:data', 'a:k:meta', 'a:')
       expect(await backend.fetch(fetchInput(input('a:other:')))).not.toBeNull()
-      expect(await primary.get('a:tag:red')).toEqual(['a:other:'])
+      expect(Object.keys(await primary.get('a:tag:red'))).toEqual(['a:other:'])
       await primary.delete('a:tag:red')
       await backend.clear('a:other:', 'a:other:data', 'a:other:meta', 'a:')
       expect(await backend.fetch(fetchInput(input('a:other:')))).toBeNull()

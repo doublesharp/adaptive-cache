@@ -69,7 +69,7 @@ describe('AdaptiveCache Class & Utils', () => {
       await cache.quit()
     })
 
-    it('should keep short-lived L1 data when async Redis update fails', async () => {
+    it('should miss unconfirmed L1 data when async Redis update fails', async () => {
       const cache = new cacheModule.AdaptiveCache(
         {
           backend: 'l1-redis',
@@ -86,7 +86,7 @@ describe('AdaptiveCache Class & Utils', () => {
       await cache.set('l1-redis-fail-key', { val: 1 })
 
       const result = await cache.get('l1-redis-fail-key')
-      expect(result?.data).toEqual({ val: 1 })
+      expect(result).toBeNull()
 
       await cache.quit()
     })
@@ -150,8 +150,8 @@ describe('AdaptiveCache Class & Utils', () => {
       expect(res2).not.toBeNull()
 
       // Verify tag set exists in Redis
-      const tagKey = 'adaptive:tag:' + tag
-      const members = await redisClient.smembers(tagKey)
+      const tagKey = 'adaptive:__adaptive:tag-index:' + tag
+      const members = await redisClient.zrange(tagKey, 0, -1)
       expect(members).toContain(key1)
       expect(members).toContain(key2)
       expect(await redisClient.ttl(tagKey)).toBeGreaterThan(0)
@@ -168,7 +168,7 @@ describe('AdaptiveCache Class & Utils', () => {
       expect(await redisClient.hgetall(key2 + 'meta')).toEqual({})
 
       // Verify tag set is gone
-      const membersAfter = await redisClient.smembers(tagKey)
+      const membersAfter = await redisClient.zrange(tagKey, 0, -1)
       expect(membersAfter.length).toBe(0)
     })
 
@@ -177,8 +177,8 @@ describe('AdaptiveCache Class & Utils', () => {
       const key = 'multi-tag-key'
       await cache.set(key, { val: 1 }, { tags: ['tag1', 'tag2'] })
 
-      const members1 = await redisClient.smembers('adaptive:tag:tag1')
-      const members2 = await redisClient.smembers('adaptive:tag:tag2')
+      const members1 = await redisClient.zrange('adaptive:__adaptive:tag-index:tag1', 0, -1)
+      const members2 = await redisClient.zrange('adaptive:__adaptive:tag-index:tag2', 0, -1)
       expect(members1).toContain(key)
       expect(members2).toContain(key)
 
@@ -192,12 +192,12 @@ describe('AdaptiveCache Class & Utils', () => {
       const tag = 'non-existent-tag'
 
       // Ensure tag is empty
-      await redisClient.del('adaptive:tag:' + tag)
+      await redisClient.del('adaptive:__adaptive:tag-index:' + tag)
 
       await cache.invalidateTags([tag])
 
       // Should not throw and should have tried to delete the tag key
-      const exists = await redisClient.exists('adaptive:tag:' + tag)
+      const exists = await redisClient.exists('adaptive:__adaptive:tag-index:' + tag)
       expect(exists).toBe(0)
     })
 

@@ -151,6 +151,8 @@ describe('ClusteredLruAdaptiveCacheBackend edge cases', () => {
       encodedData: JSON.stringify({ ok: true }),
       ttl: 0,
     })
+    expect(await backend.fetch(fetchInput)).toBeNull()
+    await backend.hydrateFromFetch(fetchInput, { encodedData: 'hydrated', ttl: 1 })
     expect((await backend.fetch(fetchInput))?.metadata?.hash).toBe('')
 
     await backend.hydrateFromUpdate(updateInput, ['CACHED', false, false, false, false] as any)

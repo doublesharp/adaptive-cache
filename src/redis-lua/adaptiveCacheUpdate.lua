@@ -39,6 +39,7 @@ if old[3] and old[3] ~= generation then redis.call('DEL', metaKey) end
 if old[1] and old[2] then
   for _, tag in ipairs(cjson.decode(old[2])) do
     redis.call('SREM', old[1] .. 'tag:' .. tag, key)
+    redis.call('ZREM', old[1] .. '__adaptive:tag-index:' .. tag, key)
   end
 end
 
@@ -123,19 +124,23 @@ local staleTTL = math.max(0, tonumber(ARGV[11] or '0'))
 local retentionMs = math.max(1, math.floor((freshTTL + staleTTL) * 1000))
 local tags = ARGV[10] or '[]'
 local epochs = {}
-redis.call('HSET', stateKey, 'prefix', prefix, 'tags', tags, 'generation', generation, 'freshUntil', nowMs + math.floor(freshTTL * 1000))
+redis.call('HSET', stateKey, 'prefix', prefix, 'tags', tags, 'generation', generation, 'freshUntil', nowMs + math.floor(freshTTL * 1000), 'revision', uuid)
 redis.call('PEXPIRE', stateKey, math.max(retentionMs, metaTTL * 1000))
 for _, tag in ipairs(cjson.decode(tags)) do
   local epochKey = prefix .. '__adaptive:tag-epoch:' .. tag
   local epoch = redis.call('GET', epochKey)
   if not epoch then epoch = uuid; redis.call('SET', epochKey, epoch) end
   epochs[epochKey] = epoch
-  redis.call('SADD', prefix .. 'tag:' .. tag, key)
+  local indexKey = prefix .. '__adaptive:tag-index:' .. tag
+  -- Bound foreground pruning even when many members expired between writes.
+  local expired = redis.call('ZRANGEBYSCORE', indexKey, '-inf', nowMs, 'LIMIT', 0, 100)
+  if #expired > 0 then redis.call('ZREM', indexKey, unpack(expired)) end
+  redis.call('ZADD', indexKey, nowMs + retentionMs, key)
   -- Index lifetime must never be shortened below another member's lifetime.
   local tagTTL = math.max(retentionMs, metaTTL * 1000)
   if redis.call('PTTL', epochKey) < tagTTL then redis.call('PEXPIRE', epochKey, tagTTL) end
-  if redis.call('PTTL', prefix .. 'tag:' .. tag) < tagTTL then
-    redis.call('PEXPIRE', prefix .. 'tag:' .. tag, tagTTL)
+  if redis.call('PTTL', indexKey) < tagTTL then
+    redis.call('PEXPIRE', indexKey, tagTTL)
   end
 end
 -- Store new metadata
@@ -147,7 +152,8 @@ redis.call('HSET', metaKey,
 -- Set expiration for metadata
 redis.call('EXPIRE', metaKey, metaTTL)
 -- Store actual data with updated TTL
-local envelope = {data = data, prefix = prefix, namespace = generation, freshUntil = nowMs + math.floor(freshTTL * 1000), epochs = epochs, tags = cjson.decode(tags)}
+redis.call('SET', dataKey .. ':revision', uuid, 'PX', retentionMs)
+local envelope = {revision = uuid, data = data, prefix = prefix, namespace = generation, freshUntil = nowMs + math.floor(freshTTL * 1000), epochs = epochs, tags = cjson.decode(tags)}
 redis.call('SET', dataKey, '@ac-redis:1:' .. cjson.encode(envelope), 'PX', retentionMs)
 
 -- RESP numeric replies truncate fractions. Preserve new-policy caps as decimal text.

@@ -4,7 +4,7 @@ import { type LruEnvelope, metadataFromEnvelope } from './lruEnvelope'
 export function lruFetchResult(
   envelope: LruEnvelope,
   input: AdaptiveCacheBackendFetchInput,
-): (AdaptiveCacheFetchResult & { writeToken?: string }) | null {
+): (AdaptiveCacheFetchResult & { writeToken?: string; revision?: string; freshUntil?: number }) | null {
   // Validation can await IPC: check retention again after those reads complete.
   const now = Date.now()
   if (envelope.expiresAt <= now) return null
@@ -14,6 +14,8 @@ export function lruFetchResult(
   return {
     encodedData: envelope.encodedData,
     writeToken: envelope.writeToken,
+    revision: envelope.revision,
+    freshUntil,
     ttl: Math.max(0, Math.ceil((freshUntil - now) / 1000)),
     stale,
     staleAge: Math.max(0, (now - freshUntil) / 1000),

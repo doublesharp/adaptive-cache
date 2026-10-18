@@ -45,6 +45,17 @@ type ClusteredCache = {
   withoutLocal?(): ClusteredCache
 }
 
+// Expiry belongs to each member; refreshing one member never renews another.
+const liveTagMembers = async (cache: ClusteredCache, key: string) => {
+  const value = (await cache.get(key, { bypassL1: true })) as string[] | Record<string, number> | undefined
+  const legacyExpiresAt = Array.isArray(value) ? Date.now() + Math.max(0, await cache.getRemainingTTL(key)) : 0
+  const now = Date.now()
+  const members = Array.isArray(value)
+    ? value.map((member) => [member, legacyExpiresAt] as const)
+    : Object.entries(value || {})
+  return Object.fromEntries(members.filter(([, expiresAt]) => expiresAt > now))
+}
+
 const mutationQueues = new Map<string, Promise<unknown>>()
 
 const requireOptional = createRequire(__filename)
@@ -142,7 +153,7 @@ export class ClusteredLruAdaptiveCacheBackend implements AdaptiveCacheBackend {
 
   public async fetch(
     input: AdaptiveCacheBackendFetchInput,
-  ): Promise<(AdaptiveCacheFetchResult & { writeToken?: string }) | null> {
+  ): Promise<(AdaptiveCacheFetchResult & { writeToken?: string; revision?: string; freshUntil?: number }) | null> {
     const cache = await this.getCache()
     const envelope = (await cache.get(input.dataKey)) as LruEnvelope | undefined
     if (!envelope || envelope.expiresAt <= Date.now()) return null
@@ -204,12 +215,7 @@ export class ClusteredLruAdaptiveCacheBackend implements AdaptiveCacheBackend {
         updateL1: true,
       })
       await this.storeEnvelope(input.dataKey, envelope)
-      await this.storeTags(
-        input.redisPrefix,
-        input.key,
-        input.tags,
-        Math.max(input.metaTTL, (envelope.expiresAt - Date.now()) / 1000),
-      )
+      await this.storeTags(input.redisPrefix, input.key, input.tags, envelope.expiresAt)
 
       return ['CACHED', next.dataTTL, next.lastChanged, next.changeCount, input.responseHash, next.changed ? 1 : 0]
     })
@@ -224,23 +230,21 @@ export class ClusteredLruAdaptiveCacheBackend implements AdaptiveCacheBackend {
     })
     envelope.namespaceGeneration = await this.generation(input.redisPrefix + '__adaptive:namespace')
     await this.storeEnvelope(input.dataKey, envelope)
-    await this.storeTags(
-      input.redisPrefix,
-      input.key,
-      input.tags,
-      Math.max(input.metaTTL, (envelope.expiresAt - Date.now()) / 1000),
-    )
+    await this.storeTags(input.redisPrefix, input.key, input.tags, envelope.expiresAt)
   }
 
   public async hydrateFromFetch(
     input: AdaptiveCacheBackendFetchInput,
-    result: AdaptiveCacheFetchResult,
+    result: AdaptiveCacheFetchResult & { revision?: string; freshUntil?: number },
     writeToken?: string,
   ) {
-    const dataTTL = Math.max(1, result.ttl)
+    const dataTTL = Math.max(0, result.ttl)
+    const expiresAt = result.freshUntil ?? Date.now() + dataTTL * 1000
+    if (expiresAt <= Date.now()) return
     const metadata = result.metadata || {}
     const envelope: LruEnvelope = {
       encodedData: result.encodedData,
+      revision: result.revision,
       writeToken,
       hash: typeof metadata.hash === 'string' ? metadata.hash : '',
       dataTTL: toFiniteNumber(metadata.dataTTL, dataTTL),
@@ -250,10 +254,10 @@ export class ClusteredLruAdaptiveCacheBackend implements AdaptiveCacheBackend {
       prefix: input.redisPrefix,
       createdAt: Date.now(),
       updatedAt: Date.now(),
-      expiresAt: Date.now() + dataTTL * 1000,
+      expiresAt,
     }
 
-    await this.storeEnvelope(input.dataKey, envelope, dataTTL)
+    await this.storeEnvelope(input.dataKey, envelope)
   }
 
   public async hydrateFromUpdate(input: AdaptiveCacheBackendUpdateInput, result: AdaptiveCacheUpdateResult) {
@@ -268,12 +272,7 @@ export class ClusteredLruAdaptiveCacheBackend implements AdaptiveCacheBackend {
     if (result[0] === 'INVALIDATED') return
     envelope.namespaceGeneration = await this.generation(input.redisPrefix + '__adaptive:namespace')
     await this.storeEnvelope(input.dataKey, envelope)
-    await this.storeTags(
-      input.redisPrefix,
-      input.key,
-      input.tags,
-      Math.max(input.metaTTL, (envelope.expiresAt - Date.now()) / 1000),
-    )
+    await this.storeTags(input.redisPrefix, input.key, input.tags, envelope.expiresAt)
   }
 
   private async removeTags(key: string, dataKey: string) {
@@ -282,9 +281,9 @@ export class ClusteredLruAdaptiveCacheBackend implements AdaptiveCacheBackend {
     if (!old) return
     for (const tag of old.tags) {
       const tagKey = this.tagKey(old.prefix, tag)
-      const keys = ((await cache.get(tagKey, { bypassL1: true })) as string[] | undefined) || []
-      const next = keys.filter((member) => member !== key)
-      if (!next.length) await cache.delete(tagKey)
+      const next = await liveTagMembers(cache, tagKey)
+      delete next[key]
+      if (!Object.keys(next).length) await cache.delete(tagKey)
       else
         await cache.set(tagKey, next, {
           ttl: Math.max(1, await cache.getRemainingTTL(tagKey)),
@@ -312,8 +311,8 @@ export class ClusteredLruAdaptiveCacheBackend implements AdaptiveCacheBackend {
       for (const tag of tags) {
         await cache.set(redisPrefix + '__adaptive:tag-epoch:' + tag, randomUUID(), { size: 64, updateL1: true })
         const tagKey = this.tagKey(redisPrefix, tag)
-        const keys = ((await cache.get(tagKey, { bypassL1: true })) as string[] | undefined) || []
-        for (const key of keys) {
+        const members = await liveTagMembers(cache, tagKey)
+        for (const key of Object.keys(members)) {
           const envelope = (await cache.get(key + 'data', { bypassL1: true })) as LruEnvelope | undefined
           // An expired or overwritten entry must not be invalidated by obsolete membership.
           if (envelope && !envelope.tags.includes(tag)) continue
@@ -468,18 +467,23 @@ export class ClusteredLruAdaptiveCacheBackend implements AdaptiveCacheBackend {
     return stored
   }
 
-  private async storeTags(redisPrefix: string, key: string, tags: string[], metaTTL: number) {
+  private async storeTags(redisPrefix: string, key: string, tags: string[], expiresAt: number) {
     if (tags.length === 0) return
 
     const cache = await this.getCache()
     await Promise.all(
       tags.map(async (tag) => {
         const tagKey = this.tagKey(redisPrefix, tag)
-        const existing = ((await cache.get(tagKey, { bypassL1: true })) as string[] | undefined) || []
-        const next = Array.from(new Set([...existing, key]))
+        const next = { ...(await liveTagMembers(cache, tagKey)), [key]: expiresAt }
+        const size = Buffer.byteLength(JSON.stringify(next), 'utf8') + METADATA_SIZE_OVERHEAD_BYTES
+        // Oversized indexes may be evicted; epoch fencing still invalidates payloads.
+        if (size > this.maxEntrySizeBytes) {
+          await cache.delete(tagKey)
+          return
+        }
         await cache.set(tagKey, next, {
-          ttl: Math.max(metaTTL * 1000, await cache.getRemainingTTL(tagKey)),
-          size: Buffer.byteLength(JSON.stringify(next), 'utf8') + METADATA_SIZE_OVERHEAD_BYTES,
+          ttl: Math.max(1, Object.values(next).reduce((maximum, expiry) => Math.max(maximum, expiry), 0) - Date.now()),
+          size,
           updateL1: true,
         })
       }),
