@@ -2,6 +2,39 @@
 
 Notable changes by version. See [release history and process](docs/releases.md) for historical source revisions and upgrade instructions.
 
+## 0.2.0 - 2026-10-17
+
+This release adds bounded loader and shutdown lifetimes and changes HTTP cache identity and Fastify registration behavior. Review the upgrade notes before deploying.
+
+### Fixed
+
+- Include request authority and port in default HTTP keys. Let `clearAdaptiveCache` accept authority as an optional fifth argument, and keep adapter `.clear(request)` aligned with lookup.
+- Run Fastify cache lookups and explicit loaders after validation and authorization hooks. Wrap routes declared after awaited adapter registration, respecting scope and registration prefix.
+- Run explicit HTTP loaders once when caching fails and propagate source errors. Normalize binary views to buffers and give each caller an independent unsupported or consumable source result without storage.
+- Give default adapters owned caches and connections. Preserve caller-owned injected caches and Redis clients during shutdown.
+- Validate durable entry revisions on L1 hits so ordinary writes invalidate stale payloads even if Pub/Sub publication is lost or a fingerprint ignores a changed field.
+- Replace unbounded Redis tag sets with expiry-aware indexes and bounded cleanup after atomic epoch invalidation. Continue reading and clearing legacy tag sets.
+
+### Added
+
+- Per-caller `getOrSet` signals and configurable execution deadlines, defaulting to 30000ms. Loaders receive a typed shared `AbortSignal`; detached results cannot start later writes.
+- Bounded `close({ timeoutMs })`, defaulting to 5000ms, with `TimeoutError` on expiry and optional forced backend teardown.
+- Packed CJS/ESM and package-name declaration consumers without optional peers, plus Express 4/5 and Fastify 4/5 runtime/type compatibility checks in PR CI on Node 22 and 24.
+
+### Changed
+
+- Require optional clustered-LRU peer `^2.1.2` and verify development against `2.1.2`. Upstream fixes cover IPC failures, L1 invalidation and fill races, and namespace cleanup. Clustered adapter write and lock-release limits remain unchanged.
+- Refresh eligible development dependencies under the configured release-age policy. Scoped Vite and esbuild overrides remove development-tool advisories.
+- Simplify the README, put usage examples before internals, and leave release history in the changelog and upgrade guide.
+- Keep raw benchmark evidence outside Git; retain the measurement summaries and reproduction commands in the documentation.
+
+### Upgrade notes
+
+- Use a new key prefix when overlapping older writers. New revisions and tag indexes cannot make older processes enforce the new guarantees. Default HTTP keys also change, leaving older keys to expire.
+- Await Fastify adapter installation before declaring cached routes. Review long-running loaders and shutdown handlers for the new finite deadlines.
+- Use adapter `.clear(request)` and `.cache.invalidateTags()` for its owned cache. Process-wide helpers operate on the separate default cache.
+- See [rollout instructions](docs/releases.md#upgrading-to-020) for details.
+
 ## 0.1.1 - 2026-09-11
 
 ### Added
