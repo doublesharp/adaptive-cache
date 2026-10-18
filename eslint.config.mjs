@@ -4,12 +4,17 @@ import tsPlugin from '@typescript-eslint/eslint-plugin'
 import prettier from 'eslint-config-prettier'
 
 const nodeGlobals = {
+  AbortController: 'readonly',
+  AbortSignal: 'readonly',
+  DOMException: 'readonly',
   Buffer: 'readonly',
   clearTimeout: 'readonly',
+  clearInterval: 'readonly',
   console: 'readonly',
   global: 'readonly',
   process: 'readonly',
   setTimeout: 'readonly',
+  setInterval: 'readonly',
   __dirname: 'readonly',
   __filename: 'readonly',
 }

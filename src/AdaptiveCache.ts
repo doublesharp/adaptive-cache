@@ -16,16 +16,25 @@ import {
   AdaptiveCacheSetOptions,
   AdaptiveCacheHit,
   AdaptiveCacheLoadOptions,
+  AdaptiveCacheLoaderContext,
+  AdaptiveCacheCloseOptions,
   AdaptiveCacheStats,
   AdaptiveCacheEvent,
 } from './types'
 
 const DEFAULT_MAX_TTL = 60 * 15
+const MAX_TIMER_DELAY_MS = 2147483647
 
 const validateNumber = (name: string, value: number | undefined, min = 0, inclusive = true) => {
   if (value !== undefined && (!Number.isFinite(value) || (inclusive ? value < min : value <= min))) {
     throw new RangeError(`${name} must be a finite number ${inclusive ? 'at least' : 'greater than'} ${min}`)
   }
+}
+
+const validateTimer = (name: string, value: number | undefined) => {
+  validateNumber(name, value)
+  if (value !== undefined && value > MAX_TIMER_DELAY_MS)
+    throw new RangeError(`${name} must be at most ${MAX_TIMER_DELAY_MS} milliseconds`)
 }
 
 const validateSettings = (options: AdaptiveCacheOptions | AdaptiveCacheLoadOptions) => {
@@ -39,6 +48,7 @@ const validateSettings = (options: AdaptiveCacheOptions | AdaptiveCacheLoadOptio
   ] as const) {
     validateNumber(name, (options as AdaptiveCacheLoadOptions)[name])
   }
+  validateTimer('loadTimeoutMs', (options as AdaptiveCacheLoadOptions).loadTimeoutMs)
   if (options.ttlJitter !== undefined && options.ttlJitter > 1)
     throw new RangeError('ttlJitter must be between 0 and 1')
   if (typeof options.maxTTL === 'number') validateNumber('maxTTL', options.maxTTL, 0, false)
@@ -46,6 +56,8 @@ const validateSettings = (options: AdaptiveCacheOptions | AdaptiveCacheLoadOptio
 
 export class AdaptiveCache {
   public static DEFAULT_LOCK_EXPIRATION_SECONDS = 60
+  public static DEFAULT_LOAD_TIMEOUT_MS = 30000
+  public static DEFAULT_CLOSE_TIMEOUT_MS = 5000
 
   public static setDefaultLockExpirationSeconds(secs: number) {
     AdaptiveCache.DEFAULT_LOCK_EXPIRATION_SECONDS = secs
@@ -79,6 +91,7 @@ export class AdaptiveCache {
 
   constructor(options: AdaptiveCacheOptions = {}, client?: Redis) {
     validateSettings(options)
+    validateTimer('closeTimeoutMs', options.closeTimeoutMs)
     this.ttlPolicy = normalizeTtlPolicy(options.ttlPolicy)
     for (const name of ['initialTTL', 'ttlScaling', 'metaTTL', 'lockExpirationSeconds'] as const)
       validateNumber(name, options[name], 0, false)
@@ -274,6 +287,7 @@ export class AdaptiveCache {
     data: any,
     options: AdaptiveCacheSetOptions = {},
     lease?: { lockKey: string; lockValue: string },
+    signal?: AbortSignal,
   ) {
     validateSettings(options)
     const started = performance.now()
@@ -286,6 +300,7 @@ export class AdaptiveCache {
         throw new Error('Backend does not support captureWriteToken required for asynchronous encoding')
       const responseHash = fingerprint(data, this.options)
       const encodedData = await encode(data, this.options)
+      signal?.throwIfAborted()
       const result = await this.backend.update({
         key,
         dataKey: key + 'data',
@@ -319,14 +334,25 @@ export class AdaptiveCache {
     }
   }
 
+  public resolveLoadTimeoutMs(options: Pick<AdaptiveCacheLoadOptions<unknown>, 'loadTimeoutMs'> = {}): number {
+    const timeoutMs = options.loadTimeoutMs ?? this.options.loadTimeoutMs ?? AdaptiveCache.DEFAULT_LOAD_TIMEOUT_MS
+    validateTimer('loadTimeoutMs', timeoutMs)
+    return timeoutMs
+  }
+
   public async getOrSet<T>(
     key: string,
-    loader: () => Promise<T>,
+    loader: (context: AdaptiveCacheLoaderContext) => Promise<T>,
     options: AdaptiveCacheLoadOptions<T> = {},
   ): Promise<T> {
     this.assertOpen()
     validateSettings(options)
-    return this.track(this.loader.getOrSet(key, loader, options))
+    return this.track(
+      this.loader.getOrSet(key, loader, {
+        ...options,
+        loadTimeoutMs: this.resolveLoadTimeoutMs(options),
+      }),
+    )
   }
 
   public async getMany<T = any>(keys: string[]): Promise<Map<string, AdaptiveCacheHit<T> | null>> {
@@ -434,19 +460,63 @@ export class AdaptiveCache {
   }
 
   public quit(preserveSharedCache = false) {
+    return this.beginClose(preserveSharedCache, this.options.closeTimeoutMs ?? AdaptiveCache.DEFAULT_CLOSE_TIMEOUT_MS)
+  }
+
+  private detachBackendObserver() {
+    const unsubscribe = this.unsubscribeBackend
+    this.unsubscribeBackend = undefined
+    const failed = (error: unknown) => this.emit({ type: 'error', reason: 'backend-unsubscribe', error })
+    try {
+      void Promise.resolve(unsubscribe?.()).catch(failed)
+    } catch (error) {
+      failed(error)
+    }
+  }
+
+  private beginClose(preserveSharedCache: boolean, timeoutMs: number): Promise<unknown> {
     if (!this.closePromise) {
+      validateTimer('timeoutMs', timeoutMs)
       this.closing = true
-      this.closePromise = (async () => {
-        await this.flush()
-        this.unsubscribeBackend?.()
-        return this.backend.quit?.(preserveSharedCache)
-      })()
+      this.closePromise = new Promise((resolve, reject) => {
+        let expired = false
+        const timer = setTimeout(() => {
+          expired = true
+          const error = new DOMException(`AdaptiveCache close timed out after ${timeoutMs}ms`, 'TimeoutError')
+          this.loader.abort(error)
+          this.detachBackendObserver()
+          // Forced teardown must not itself keep close pending for custom backends.
+          void Promise.resolve()
+            .then(() => this.backend.quit?.(preserveSharedCache, true))
+            .catch(() => {})
+          reject(error)
+        }, timeoutMs)
+        void (async () => {
+          await this.flush()
+          if (expired) return
+          this.detachBackendObserver()
+          return this.backend.quit?.(preserveSharedCache)
+        })().then(
+          (result) => {
+            clearTimeout(timer)
+            resolve(result)
+          },
+          (error) => {
+            clearTimeout(timer)
+            reject(error)
+          },
+        )
+      })
     }
     return this.closePromise
   }
 
-  public async close(): Promise<void> {
-    await this.quit()
+  public async close(options: AdaptiveCacheCloseOptions = {}): Promise<void> {
+    validateTimer('timeoutMs', options.timeoutMs)
+    await this.beginClose(
+      false,
+      options.timeoutMs ?? this.options.closeTimeoutMs ?? AdaptiveCache.DEFAULT_CLOSE_TIMEOUT_MS,
+    )
   }
 
   public async flush() {

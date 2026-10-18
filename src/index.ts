@@ -25,6 +25,8 @@ export type {
   AdaptiveCacheHit,
   AdaptiveCacheSetOptions,
   AdaptiveCacheLoadOptions,
+  AdaptiveCacheLoaderContext,
+  AdaptiveCacheCloseOptions,
   AdaptiveCacheEvent,
   AdaptiveCacheEventType,
   AdaptiveCacheStats,

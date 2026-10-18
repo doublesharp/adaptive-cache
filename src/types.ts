@@ -126,6 +126,16 @@ export interface AdaptiveCacheHit<T = any> {
   layer?: AdaptiveCacheLayer
 }
 
+export interface AdaptiveCacheLoaderContext {
+  /** Shared work is aborted when all interested callers leave or shutdown expires. */
+  signal: AbortSignal
+}
+
+export interface AdaptiveCacheCloseOptions {
+  /** Maximum shutdown time in milliseconds. Defaults to closeTimeoutMs or 5000. */
+  timeoutMs?: number
+}
+
 export interface AdaptiveCacheLoadOptions<T = any> extends Omit<AdaptiveCacheSetOptions, 'maxTTL'> {
   maxTTL?: number | ((data: T) => number | undefined)
   staleWhileRevalidate?: number
@@ -135,6 +145,9 @@ export interface AdaptiveCacheLoadOptions<T = any> extends Omit<AdaptiveCacheSet
   shouldStore?: (data: T) => boolean
   forceRefresh?: boolean
   lockWaitTimeoutMs?: number
+  /** Per-caller deadline, including cache and lock waits. Defaults to 30000ms. */
+  loadTimeoutMs?: number
+  signal?: AbortSignal
 }
 
 export type AdaptiveCacheLayer = 'l1' | 'redis' | 'lru'
@@ -220,7 +233,7 @@ export interface AdaptiveCacheBackend {
     recordRefresh?: boolean,
   ): Promise<UpdateCacheAndReleaseLockUPDATED | UpdateCacheAndReleaseLockLOCK_MISMATCH>
   flush?(): Promise<unknown>
-  quit?(preserveSharedCache?: boolean): Promise<unknown>
+  quit?(preserveSharedCache?: boolean, force?: boolean): Promise<unknown>
 }
 
 export interface AdaptiveCacheLruLocalL1Options {
@@ -273,6 +286,10 @@ export interface AdaptiveCacheOptions {
   staleIfError?: number
   negativeTTL?: number
   lockWaitTimeoutMs?: number
+  /** Default deadline for each getOrSet caller, in milliseconds. Defaults to 30000. */
+  loadTimeoutMs?: number
+  /** Default close deadline in milliseconds. Defaults to 5000. */
+  closeTimeoutMs?: number
   onEvent?: (event: AdaptiveCacheEvent) => void
   compress?: boolean // Compress the cached data, default: true
   logLevel?: 'debug' | 'info' | 'warn' | 'error' | 'silent' // Logging level
