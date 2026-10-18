@@ -1,2 +1,9 @@
 # Wait seven days after publication before resolving dependency releases.
 minimumReleaseAge: 10080
+# Explicitly requested release; keep this exception limited to this version.
+minimumReleaseAgeExclude:
+  - '@0xdoublesharp/lru-cache-clustered@2.1.2'
+# Patch development-server advisories until parent dependency ranges catch up.
+overrides:
+  'vitest>vite': 8.3.3
+  'tsup>esbuild': 0.28.2
