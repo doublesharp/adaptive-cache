@@ -10,7 +10,7 @@ on:
 
 jobs:
   quality:
-    name: lint / typecheck / coverage / build
+    name: lint / typecheck / coverage / build / consumers
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -42,3 +42,42 @@ jobs:
 
       - name: Build package
         run: pnpm run build
+
+      - name: Check consumer declarations
+        run: pnpm run test:types
+
+      - name: Check packed package without optional peers
+        run: pnpm run test:packed
+
+  compatibility:
+    name: ${{ matrix.framework }} / Node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22', '24']
+        framework: [express4, express5, fastify4, fastify5]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v5
+        with:
+          version: 10.25.0
+          run_install: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build package
+        run: pnpm run build
+
+      - name: Check packed framework runtime and declarations
+        run: pnpm run test:packed ${{ matrix.framework }}

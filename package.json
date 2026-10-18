@@ -56,11 +56,13 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
-    "quality": "pnpm run lint && pnpm run typecheck && pnpm run test:coverage && pnpm run build && pnpm run test:types",
+    "quality": "pnpm run lint && pnpm run typecheck && pnpm run test:coverage && pnpm run build && pnpm run test:types && pnpm run test:packed",
     "bench:configs": "node --expose-gc scripts/benchmark-configs.mjs",
     "clean": "rm -rf dist coverage",
     "test:types": "tsc --ignoreConfig --noEmit --strict --target es2022 --module nodenext --moduleResolution nodenext --esModuleInterop --skipLibCheck test/types/consumer.ts",
-    "bench:lru": "node --expose-gc scripts/benchmark-lru-upgrade.mjs"
+    "bench:lru": "node --expose-gc scripts/benchmark-lru-upgrade.mjs",
+    "test:packed": "node scripts/packed-package-smoke.mjs",
+    "test:compat": "node scripts/packed-package-smoke.mjs all"
   },
   "dependencies": {
     "debug": "^4.4.3",

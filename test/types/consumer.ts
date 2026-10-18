@@ -27,3 +27,16 @@ const state: AdaptiveCacheTtlPolicyState = {
   changeRate: 0.1,
 }
 void state
+
+const typedExpress = adaptiveExpressCache<Request & { tenant: string }>({
+  backend: 'clustered-lru',
+  key: (req) => req.tenant,
+  loader: async (req) => ({ id: req.params.id, tenant: req.tenant }),
+})
+express().use(typedExpress)
+const typedFastify = adaptiveFastifyCache<FastifyRequest<{ Params: { id: string } }> & { tenant: string }>({
+  backend: 'clustered-lru',
+  key: (req) => req.tenant,
+  loader: async (req) => ({ id: req.params.id, tenant: req.tenant }),
+})
+void fastify().register(typedFastify)
