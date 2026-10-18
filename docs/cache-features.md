@@ -1,6 +1,6 @@
 # Loading, freshness, and cache policy
 
-This guide describes version 0.1.1. See the [0.1.1 release notes](../CHANGELOG.md#011---2026-09-11) for the change list and [upgrade instructions](releases.md#upgrading-from-006) for compatibility and rollout steps.
+This guide covers loading, freshness, invalidation, and HTTP policy. Review the [changelog](../CHANGELOG.md) and [upgrade instructions](releases.md#upgrading-to-020) before updating an existing deployment.
 
 ## Load a value once
 
@@ -34,6 +34,27 @@ Loader `maxTTL` can also be a function of the loaded value. `cache.resolveMaxTTL
 
 Use `shouldStore(value)` to return a loaded result without caching it when your storage policy rejects it. It controls writes; it does not change whether an existing value is a hit.
 
+## Bound loader lifetime
+
+`getOrSet` defaults to a 30000ms deadline for each caller. It includes the initial read, lock wait, loader execution, storage wait, and stale fallback read. Set constructor `loadTimeoutMs` or override it per call. This deadline is separate from `lockWaitTimeoutMs` and lock expiration. The load deadline and shutdown deadline options accept finite milliseconds from `0` through `2147483647`, inclusive. Values outside that range throw `RangeError` instead of overflowing Node timers.
+
+```typescript
+const result = await cache.getOrSet(
+  'catalog:product:42',
+  async ({ signal }) => {
+    const response = await fetch(productUrl, { signal })
+    return response.json()
+  },
+  { signal: requestAbortSignal, loadTimeoutMs: 2000 },
+)
+```
+
+`cache.resolveLoadTimeoutMs({ loadTimeoutMs })` validates and returns the effective load deadline, resolving the supplied override, instance setting, then the 30000ms default. Omitting its argument returns the instance default. HTTP adapters use the same resolver, including when they receive an injected cache.
+
+Existing zero-argument loaders still work. The exported `AdaptiveCacheLoaderContext` contains the shared loader's `AbortSignal`. Each caller has its own deadline and optional `signal`. One caller leaving does not cancel work another caller still needs. Shared work aborts when its last interested caller leaves or shutdown expires. Stale background refresh retains its own bounded interest.
+
+A deadline rejects with a `DOMException` named `TimeoutError`; explicit cancellation preserves `signal.reason`, ordinarily an `AbortError`. Neither becomes a successful stale fallback. Ignoring the loader signal cannot keep the caller waiting beyond its deadline. A detached result cannot start a later cache write. Cancellation does not retract a backend write already submitted, which remains subject to lease and invalidation checks.
+
 ## Choose a TTL policy
 
 Use `ttlPolicy: { type: 'aimd' }` for additive growth and proportional decreases, or `ttlPolicy: { type: 'ewma' }` to weight observations by elapsed time. Both are opt-in; the existing adaptive policy remains the default. See [TTL policies](ttl-policies.md) for configuration and limitations.
@@ -59,6 +80,10 @@ await cache.invalidateNamespace()
 Built-in backends capture write tokens before loaders and asynchronous encoding. Invalidation advances a barrier so work started before invalidation cannot write its old value back. A caller already awaiting a loader can still receive its result; that result is not retained when its token has been invalidated. Retagging removes obsolete memberships, so invalidating an old tag does not remove a newly retagged value.
 
 Namespace invalidation makes the namespace's previous entries unreadable without scanning all payload keys. Physical payloads expire normally. Targeted invalidation can conservatively reject other in-flight writes within the same namespace, while preserving already-cached unrelated entries.
+
+Each accepted Redis write also changes an entry revision, even when the content fingerprint stays the same. Every L1 hit validates that revision and invalidation controls against Redis. A missed update publication cannot leave an older L1 payload readable. Optimistic ordinary `set()` still returns before Redis reconciliation, but an unconfirmed L1 entry falls through to Redis.
+
+New Redis tag indexes are expiry-scored sorted sets at `<prefix>__adaptive:tag-index:<tag>`. Writes prune expired memberships with bounded maintenance. Tag invalidation atomically detaches the old index and advances its epoch, making old entries unreadable immediately. Cleanup then processes bounded batches and checks generations before deleting payloads, so a concurrent fresh write survives. Active cleanup renews each unfinished detached snapshot to a 60-second TTL every 10 seconds, including snapshots queued behind a stalled batch. Abandoned snapshots expire without renewal. The drain checks original cardinality against actual member removals and resolves only when every snapshot reaches zero. A lost or evicted snapshot, failed renewal, or incomplete drain rejects explicitly rather than reporting complete invalidation. Modern entries remain epoch-fenced even if physical cleanup fails. Legacy raw payloads may remain readable until their original TTL if their snapshot is irrecoverably lost; treat rejection as incomplete invalidation. Returned keys are a deduplicated membership snapshot and may include a concurrently rewritten key whose fresh payload survived cleanup. New readers and invalidators also support legacy `<prefix>tag:<tag>` sets.
 
 New Redis entries keep freshness and generation information with the payload. Losing a separate control or tag-index key under Redis memory eviction therefore causes a miss instead of reviving invalidated data. Legacy entries remain readable, but their older format does not acquire these guarantees retroactively. Use a new key prefix when rolling out this version alongside older readers; older versions cannot decode the new Redis envelope.
 
@@ -104,7 +129,9 @@ unsubscribe()
 await cache.close()
 ```
 
-Events cover hits, misses, stale reads, refreshes, writes, invalidation, lock contention, errors, and LRU evictions. Hits identify the serving layer (`l1`, `redis`, or `lru`). Statistics are per-instance snapshots; observer exceptions cannot break cache operations. `flush()` drains pending work and background writes. `close()` drains and releases owned resources and rejects new operations. An injected Redis client stays caller-owned.
+Events cover hits, misses, stale reads, refreshes, writes, invalidation, lock contention, errors, and LRU evictions. Hits identify the serving layer (`l1`, `redis`, or `lru`). Statistics are per-instance snapshots; observer exceptions cannot break cache operations. `flush()` drains pending work and background writes without a deadline. `close({ timeoutMs })` rejects new operations, drains accepted work, flushes the backend, and releases owned resources. Its default deadline is 5000ms, configured through constructor `closeTimeoutMs` or the call's `timeoutMs`. `quit(preserveSharedCache?)` uses the same bounded default. Concurrent or repeated close calls share the first outcome.
+
+Successful close resolves after graceful teardown. On expiry it aborts owned loader work, requests forced backend teardown, and rejects with `TimeoutError`. Forced teardown is not awaited, since a custom backend may stall. Built-in Redis teardown disconnects owned clients and subscribers; an injected Redis client stays caller-owned. Custom backends can implement `quit(preserveSharedCache?, force?)` to release resources immediately when `force` is true. Existing shorter quit signatures remain compatible. Backend observer unsubscribe errors emit an isolated error event with reason `backend-unsubscribe` and cannot block graceful or forced close. The unsubscribe hook and backend teardown each run once across repeated or concurrent closes.
 
 LRU eviction counts include internal metadata and coordination entries reported by the dependency. Fenced writes rejected after invalidation emit an invalidation event with reason `write-rejected`. Loader lock-release failures emit an error event with reason `lock-release`; cleanup does not replace the loader result or its original error. Public lock operations participate in shutdown draining and reject new calls once closing begins.
 
@@ -115,6 +142,8 @@ On clustered LRU, `getMany()` batches payload reads using upstream `mGet()`, the
 Custom backends may implement `fetchMany(inputs)`, returning one result or `null` per input in exactly the same order, including duplicates. A result-length mismatch rejects the operation. Payload decoding and events use the same path as `get()`; a batch error emits a read error for every requested key. Each accepted read remains tracked until decoding completes, even if another key has already failed.
 
 ## HTTP identity and ownership
+
+Default HTTP keys contain `<prefix>authority:<sha256(authority)>:<path>:<sha256(normalized-query)>:`. Authority comes from `Host`, with `:authority` as a fallback, and is trimmed and lowercased. The port remains part of identity. Forwarded host headers are not implicitly trusted. Query keys are sorted and `refresh` is ignored by default. Custom `key(request)` functions replace authority/path/query identity and must include any required host or tenant isolation themselves. Declared header variations append their own hash.
 
 Both middleware factories accept an injected `cache`, a custom `key(request)`, declared `varyBy` headers (or a function returning a key dimension), and `shouldCache(request, response?)`. Header dimensions are case-insensitive. Custom keys remain inside the middleware prefix.
 
@@ -139,7 +168,7 @@ Range and If-Range requests bypass caching, and partial `206` responses are neve
 
 Custom key functions must return a nonempty string. Invalid results bypass caching. If compression middleware adds `Vary: Accept-Encoding`, include `Accept-Encoding` in `varyBy` alongside your other header dimensions; otherwise those responses will not be stored.
 
-Cached responses replay only `Cache-Control`, `Content-Encoding`, `Content-Language`, `Content-Type`, `ETag`, `Last-Modified`, and `Vary`, along with status and body. Arbitrary application headers are not replayed. Node and WHATWG streams bypass storage.
+Cached responses replay only `Cache-Control`, `Content-Encoding`, `Content-Language`, `Content-Type`, `ETag`, `Last-Modified`, and `Vary`, along with status and body. Arbitrary application headers are not replayed. Node and WHATWG streams bypass storage. Explicit HTTP loaders can cache JSON-compatible plain objects/arrays, finite numbers, booleans, null, strings, and buffers. ArrayBuffer views, including typed arrays and DataView, normalize to buffers before sending and storage. Native `Response`, `Blob`, `ArrayBuffer`, Date, and other objects whose native metadata cannot be replayed bypass storage; the framework still determines how to send them. Unsupported native or consumable results also bypass sharing. Each request calls its loader once and receives its own result, so loaders returning streams or native responses must create an independent result per invocation. Direct API serialization is a separate contract.
 
 Normal middleware continues to intercept the route handler response. Optional `loader(request)` mode supports safe stale refresh using `getOrSet`; it regenerates values without replaying a handler after its response has been sent. Opt-in `negativeTTL` allows brief caching of normal-handler 404 responses. Other unsuccessful statuses remain uncached.
 
@@ -150,10 +179,26 @@ await productResponses.clear({
   originalUrl: '/products/42',
   query: {},
   params: { id: '42' },
-  headers: { 'accept-language': 'en' },
+  headers: { host: 'shop.example:8080', 'accept-language': 'en' },
 })
 ```
 
 Pass the identity of the request whose cached response should be removed, including any parameters and headers used by `key` or `varyBy`. Fastify uses `url` instead of `originalUrl`. Clearing one variant leaves other variants intact. Clearing uses the injected cache when present and does not apply GET, authentication, or `shouldCache` eligibility checks, so mutation handlers can invalidate cached GET results. Invalid custom keys and clearing a closed owned adapter reject explicitly. If the key callback throws, the clear rejects rather than silently reporting success.
 
-Request-policy exceptions bypass storage while still running configured loaders. Normal-handler mode continues to the handler. Injected caches remain caller-owned. Fastify closes owned caches through its `onClose` hook. Applications using Express should call the middleware's `close()` during shutdown, after accepting no further requests. Closed adapters bypass caching. Closing an adapter does not close an injected cache; its caller manages that resource.
+Cache read, lock, and storage failures bypass caching while still running configured loaders. A request retains its source promise, so a storage failure cannot run a successful loader twice. Source errors propagate with their original thrown identity to the framework error handler, including across coalesced callers. HTTP deadlines cover the preliminary cache read, shared core load, explicit bypasses, and outage fallback source wait. A caller timing out leaves shared source work available to other interested callers. Each caller's `TimeoutError` or `AbortError` remains terminal; it does not start an unbounded fallback loader. Injected-cache load deadline settings are inherited. Request-policy exceptions bypass storage while still running configured loaders. Normal-handler mode continues to the handler. Every adapter without `cache` creates its own cache and, when needed, its own Redis connection. It does not use the process-wide `getDefaultCache()` instance. Injected caches remain caller-owned. Fastify closes owned caches through its `onClose` hook. Applications using Express should call the middleware's `close()` during shutdown, after accepting no further requests. Closed adapters bypass caching. Closing an adapter does not close an injected cache; its caller manages that resource.
+
+Install the Fastify adapter before declaring the routes it should wrap, and await registration. Cache lookup and loader execution run inside the handler wrapper after validation, `preValidation`, and `preHandler`, including authorization checks. Routes declared before installation remain uncached. Register without a prefix to wrap later routes in that scope. A registration `prefix` limits wrapping to matching route paths and descendants of that path; it does not move route declarations under that prefix. Normal Fastify encapsulation still applies.
+
+```typescript
+await fastify.register(adaptiveFastifyCache({ cache, keyPrefix: 'catalog:' }), { prefix: '/api' })
+fastify.get('/api/products', { preHandler: authorize }, loadProducts)
+fastify.get('/health', healthCheck) // Outside /api, uncached.
+```
+
+Prefer `.clear(request)` so default authority, custom keys, and `varyBy` match lookup exactly. Include `headers.host`, including its port, when constructing a clearing request. For default keys, the legacy helper accepts authority as an optional fifth argument:
+
+```typescript
+await clearAdaptiveCache('/products/42', {}, 'catalog:', {}, 'shop.example:8080')
+```
+
+Omitting authority retains the legacy key format and clears an older key. The helper cannot reproduce arbitrary custom keys or header variations. It also does not target an injected cache instance; use the adapter's `.clear(request)` for those cases. Use `.cache.invalidateTags()` on the owning adapter for tag invalidation rather than `getDefaultCache()`.
