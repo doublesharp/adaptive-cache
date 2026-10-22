@@ -199,7 +199,7 @@ Stale windows are measured independently from freshness expiry. Plain `get()` re
 
 Each `getOrSet` caller has a 30000ms deadline by default. Configure `loadTimeoutMs` or pass a caller `signal` to change it. Loaders receive a shared `{ signal }`; one caller timing out does not cancel work another caller still needs. HTTP deadlines also cover cache reads, bypassed loaders, and fallback waits. Source errors retain their original identity.
 
-`close()` drains work within a 5000ms default deadline, then aborts loaders and requests forced teardown. Configure `closeTimeoutMs` or pass `close({ timeoutMs })`. Expiry rejects with `TimeoutError`. See [loader lifetime](docs/cache-features.md#bound-loader-lifetime) and [shutdown](docs/cache-features.md#observe-and-drain-work).
+`close()` drains work within a 5000ms default deadline, then aborts loaders and requests forced teardown. An earlier graceful shutdown failure also requests forced teardown and preserves the original error. Owned Redis connections are disconnected; injected clients remain caller-owned. Configure `closeTimeoutMs` or pass `close({ timeoutMs })`. Expiry rejects with `TimeoutError`. See [loader lifetime](docs/cache-features.md#bound-loader-lifetime) and [shutdown](docs/cache-features.md#observe-and-drain-work).
 
 ### HTTP identity and response policy
 

@@ -2,7 +2,7 @@
 
 Notable changes by version. See [release history and process](docs/releases.md) for historical source revisions and upgrade instructions.
 
-## Unreleased
+## 0.2.1 - 2026-10-21
 
 ### Fixed
 
@@ -14,6 +14,11 @@ Notable changes by version. See [release history and process](docs/releases.md) 
 ### Added
 
 - Seeded fuzz and invariant tests for cache operation sequences, write fencing, shutdown faults, connection ownership, and temporary-helper observer cleanup. Run them with `pnpm run test:fuzz`; replay failures with `FUZZ_SEED` and `FUZZ_PATH`.
+
+### Upgrade notes
+
+- No additional cache-format migration from 0.2.0. When upgrading from 0.1.1 or earlier, also follow the [0.2.0 upgrade instructions](docs/releases.md#upgrading-to-020).
+- Continue handling rejected `close()` and `quit()` calls. Cleanup now proceeds after graceful shutdown fails, while callers retain the original error. Custom backend teardown should tolerate a subsequent forced call.
 
 ## 0.2.0 - 2026-10-17
 
