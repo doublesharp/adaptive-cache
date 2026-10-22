@@ -140,19 +140,24 @@ export class AdaptiveCache {
 
     const ownsClient = !client
     this.redisClient = client || RedisAdaptiveCacheBackend.createClient(this.logger)
-    const redisBackend = new RedisAdaptiveCacheBackend(this.redisClient, this.logger, ownsClient)
+    try {
+      const redisBackend = new RedisAdaptiveCacheBackend(this.redisClient, this.logger, ownsClient)
 
-    if (backendName === 'l1-redis') {
-      return new L1RedisAdaptiveCacheBackend(
-        redisBackend,
-        new ClusteredLruAdaptiveCacheBackend(options.lru, this.logger),
-        this.getKeyPrefix(),
-        this.logger,
-        options.l1Redis?.writeMode,
-      )
+      if (backendName === 'l1-redis') {
+        return new L1RedisAdaptiveCacheBackend(
+          redisBackend,
+          new ClusteredLruAdaptiveCacheBackend(options.lru, this.logger),
+          this.getKeyPrefix(),
+          this.logger,
+          options.l1Redis?.writeMode,
+        )
+      }
+
+      return redisBackend
+    } catch (error) {
+      if (ownsClient) this.redisClient.disconnect()
+      throw error
     }
-
-    return redisBackend
   }
 
   private getKeyPrefix() {

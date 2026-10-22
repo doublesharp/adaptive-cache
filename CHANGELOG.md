@@ -7,6 +7,7 @@ Notable changes by version. See [release history and process](docs/releases.md) 
 ### Fixed
 
 - Finish Redis and L1 cleanup when graceful shutdown rejects. Disconnect owned Redis connections, preserve caller-owned clients and the original shutdown error, and force teardown after an early close failure.
+- Disconnect owned Redis clients if backend initialization throws before the cache instance can be returned.
 
 ## 0.2.0 - 2026-10-17
 
