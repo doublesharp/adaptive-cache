@@ -203,17 +203,32 @@ export class L1RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
   }
 
   public async quit(preserveSharedCache = false, force = false) {
-    if (!force) await this.flush()
-
-    if (this.subscriber) {
-      if (force) this.subscriber.disconnect()
-      else await this.subscriber.quit()
-      this.subscriber = undefined
+    const failures: unknown[] = []
+    for (const cleanup of [
+      async () => {
+        if (!force) await this.flush()
+      },
+      async () => {
+        const subscriber = this.subscriber
+        if (!subscriber) return
+        try {
+          if (!force) await subscriber.quit()
+        } finally {
+          subscriber.disconnect()
+          this.subscriber = undefined
+        }
+      },
+      // Disconnect Redis before a potentially stalled local cache teardown.
+      () => this.redis.quit(preserveSharedCache, force),
+      () => this.lru.quit(preserveSharedCache),
+    ]) {
+      try {
+        await cleanup()
+      } catch (error) {
+        failures.push(error)
+      }
     }
-
-    // Disconnect first so a stalled local cache teardown cannot hold Redis open.
-    await this.redis.quit(preserveSharedCache, force)
-    await this.lru.quit(preserveSharedCache)
+    if (failures.length > 0) throw failures[0]
   }
 
   public async flush() {

@@ -10,6 +10,57 @@ const namespace = (name: string) => `adaptive-cache-backend-${name}-${Date.now()
 const logger = () => new Logger('silent')
 
 describe('L1RedisAdaptiveCacheBackend', () => {
+  it.each(['flush', 'subscriber', 'redis', 'all'])('finishes all cleanup after %s shutdown failure', async (stage) => {
+    const redis = new FakeRedis()
+    const redisBackend = new RedisAdaptiveCacheBackend(redis as any, logger(), true)
+    const lru = new ClusteredLruAdaptiveCacheBackend({ namespace: namespace('shutdown') }, logger())
+    const backend = new L1RedisAdaptiveCacheBackend(redisBackend, lru, 'adaptive:', logger())
+    const subscriber = (backend as any).subscriber as FakeRedis
+    const failure = new Error(stage + ' unavailable')
+    if (stage === 'flush' || stage === 'all') vi.spyOn(backend, 'flush').mockRejectedValue(failure)
+    const subscriberQuit = vi.spyOn(subscriber, 'quit')
+    const redisQuit = vi.spyOn(redis, 'quit')
+    const lruQuit = vi.spyOn(lru, 'quit')
+    if (stage === 'subscriber' || stage === 'all') subscriberQuit.mockRejectedValue(failure)
+    if (stage === 'redis' || stage === 'all') redisQuit.mockRejectedValue(failure)
+    if (stage === 'all') lruQuit.mockRejectedValue(new Error('LRU cleanup failed'))
+
+    try {
+      await expect(backend.quit(true)).rejects.toBe(failure)
+      expect(subscriber.disconnectCalls).toBe(1)
+      expect(subscriberQuit).toHaveBeenCalledTimes(1)
+      expect(redisQuit).toHaveBeenCalledTimes(1)
+      expect(redis.disconnectCalls).toBe(1)
+      expect(lruQuit).toHaveBeenCalledWith(true)
+      expect((backend as any).subscriber).toBeUndefined()
+    } finally {
+      vi.restoreAllMocks()
+      await backend.quit(false, true)
+    }
+  })
+
+  it('forces a subscriber disconnect while its graceful quit is still pending', async () => {
+    const redis = new FakeRedis()
+    const redisBackend = new RedisAdaptiveCacheBackend(redis as any, logger())
+    const lru = new ClusteredLruAdaptiveCacheBackend({ namespace: namespace('forced-shutdown') }, logger())
+    const backend = new L1RedisAdaptiveCacheBackend(redisBackend, lru, 'adaptive:', logger())
+    const subscriber = (backend as any).subscriber as FakeRedis
+    let finishQuit!: () => void
+    vi.spyOn(subscriber, 'quit').mockImplementation(
+      () =>
+        new Promise<string>((resolve) => {
+          finishQuit = () => resolve('OK')
+        }),
+    )
+    const closing = backend.quit()
+    await vi.waitFor(() => expect(finishQuit).toBeTypeOf('function'))
+    await backend.quit(false, true)
+    expect(subscriber.disconnectCalls).toBe(1)
+    expect(redis.disconnectCalls).toBe(0)
+    finishQuit()
+    await closing
+  })
+
   it('should read through Redis, hydrate L1, write conservatively, reconcile asynchronously, and invalidate', async () => {
     const redis = new FakeRedis()
     const redisBackend = new RedisAdaptiveCacheBackend(redis as any, logger())

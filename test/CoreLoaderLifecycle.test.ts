@@ -267,6 +267,52 @@ describe('cancellation across cache stages', () => {
 })
 
 describe('shutdown backend failures', () => {
+  it('does not force teardown twice when graceful quit rejects after the deadline', async () => {
+    const store = backend()
+    const originalQuit = store.quit.bind(store)
+    const started = gate()
+    let failQuit!: (error: Error) => void
+    const quit = vi.spyOn(store, 'quit').mockImplementation((_preserve, force?: boolean) => {
+      if (force) return originalQuit()
+      started.resolve()
+      return new Promise((_resolve, reject) => {
+        failQuit = reject
+      })
+    })
+    const cache = new AdaptiveCache({ backend: store, logLevel: 'silent' })
+    const closing = cache.close({ timeoutMs: 15 })
+    const outcome = closing.catch((error: Error) => error)
+    await started.promise
+    expect(await outcome).toMatchObject({ name: 'TimeoutError' })
+    failQuit(new Error('late graceful rejection'))
+    await setImmediate()
+
+    expect(quit).toHaveBeenCalledTimes(2)
+    expect(quit.mock.calls).toEqual([[false], [false, true]])
+    await expect(cache.close()).rejects.toMatchObject({ name: 'TimeoutError' })
+  })
+
+  it.each(['flush', 'quit'])('forces cleanup after immediate %s rejection and preserves the error', async (stage) => {
+    const store = Object.assign(backend(), { flush: vi.fn(async () => {}) })
+    const originalQuit = store.quit.bind(store)
+    const failure = new Error('graceful shutdown failed')
+    if (stage === 'flush') store.flush.mockRejectedValue(failure)
+    const quit = vi.spyOn(store, 'quit').mockImplementation(async (_preserve, force?: boolean) => {
+      if (!force && stage === 'quit') throw failure
+      return originalQuit()
+    })
+    const unsubscribe = vi.fn()
+    vi.spyOn(store, 'onEvent').mockReturnValue(unsubscribe)
+    const cache = new AdaptiveCache({ backend: store, logLevel: 'silent' })
+
+    await expect(cache.quit(true)).rejects.toBe(failure)
+    await setImmediate()
+    expect(unsubscribe).toHaveBeenCalledTimes(1)
+    expect(quit).toHaveBeenCalledWith(true, true)
+    await expect(cache.close()).rejects.toBe(failure)
+    expect(quit).toHaveBeenCalledTimes(stage === 'quit' ? 2 : 1)
+  })
+
   it('does not resume graceful teardown after a timed-out flush later finishes', async () => {
     const release = gate()
     const store = Object.assign(backend(), { flush: vi.fn(() => release.promise) })

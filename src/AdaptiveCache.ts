@@ -480,15 +480,18 @@ export class AdaptiveCache {
       this.closing = true
       this.closePromise = new Promise((resolve, reject) => {
         let expired = false
-        const timer = setTimeout(() => {
-          expired = true
-          const error = new DOMException(`AdaptiveCache close timed out after ${timeoutMs}ms`, 'TimeoutError')
-          this.loader.abort(error)
+        const forceTeardown = () => {
           this.detachBackendObserver()
           // Forced teardown must not itself keep close pending for custom backends.
           void Promise.resolve()
             .then(() => this.backend.quit?.(preserveSharedCache, true))
             .catch(() => {})
+        }
+        const timer = setTimeout(() => {
+          expired = true
+          const error = new DOMException(`AdaptiveCache close timed out after ${timeoutMs}ms`, 'TimeoutError')
+          this.loader.abort(error)
+          forceTeardown()
           reject(error)
         }, timeoutMs)
         void (async () => {
@@ -503,6 +506,7 @@ export class AdaptiveCache {
           },
           (error) => {
             clearTimeout(timer)
+            if (!expired) forceTeardown()
             reject(error)
           },
         )

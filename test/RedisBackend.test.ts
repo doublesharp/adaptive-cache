@@ -187,4 +187,24 @@ describe('RedisAdaptiveCacheBackend', () => {
 
     expect(redis.quitCalls).toBe(1)
   })
+
+  it('disconnects an owned client when graceful quit rejects', async () => {
+    const redis = new FakeRedis()
+    const failure = new Error('Redis unavailable')
+    vi.spyOn(redis, 'quit').mockRejectedValue(failure)
+    const backend = new RedisAdaptiveCacheBackend(redis as any, logger(), true)
+
+    await expect(backend.quit()).rejects.toBe(failure)
+    expect(redis.disconnectCalls).toBe(1)
+  })
+
+  it('never disconnects or quits a caller-owned client, including forced shutdown', async () => {
+    const redis = new FakeRedis()
+    const backend = new RedisAdaptiveCacheBackend(redis as any, logger())
+
+    await backend.quit()
+    await backend.quit(false, true)
+    expect(redis.quitCalls).toBe(0)
+    expect(redis.disconnectCalls).toBe(0)
+  })
 })

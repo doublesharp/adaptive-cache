@@ -2,6 +2,12 @@
 
 Notable changes by version. See [release history and process](docs/releases.md) for historical source revisions and upgrade instructions.
 
+## Unreleased
+
+### Fixed
+
+- Finish Redis and L1 cleanup when graceful shutdown rejects. Disconnect owned Redis connections, preserve caller-owned clients and the original shutdown error, and force teardown after an early close failure.
+
 ## 0.2.0 - 2026-10-17
 
 This release adds bounded loader and shutdown lifetimes and changes HTTP cache identity and Fastify registration behavior. Review the upgrade notes before deploying.
