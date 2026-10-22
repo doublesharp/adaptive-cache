@@ -1,6 +1,6 @@
 {
   "name": "@0xdoublesharp/adaptive-cache",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Adaptive caching module for Redis with Fastify and Express integration",
   "author": "Justin Silver",
   "license": "MIT",
@@ -55,6 +55,7 @@
     "format": "prettier --write .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:fuzz": "vitest run test/CacheInvariants.test.ts test/ShutdownInvariants.test.ts --no-cache",
     "test:coverage": "vitest run --coverage",
     "quality": "pnpm run lint && pnpm run typecheck && pnpm run test:coverage && pnpm run build && pnpm run test:types && pnpm run test:packed",
     "bench:configs": "node --expose-gc scripts/benchmark-configs.mjs",
@@ -81,6 +82,7 @@
     "eslint": "^10.12.0",
     "eslint-config-prettier": "^10.1.8",
     "express": "^5.2.1",
+    "fast-check": "^4.10.2",
     "fastify": "^5.12.5",
     "lru-cache": "^11.5.3",
     "prettier": "^3.9.9",

@@ -332,7 +332,12 @@ export class RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
         this.client.disconnect()
         return undefined
       }
-      return this.client.quit()
+      try {
+        return await this.client.quit()
+      } finally {
+        // A rejected QUIT can leave a reconnect timer or socket alive.
+        this.client.disconnect()
+      }
     }
     return undefined
   }

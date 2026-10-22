@@ -70,6 +70,8 @@ export class ClusteredLruAdaptiveCacheBackend implements AdaptiveCacheBackend {
   private readonly maxSizeBytes: number
   private readonly maxEntrySizeBytes: number
   private cachePromise?: Promise<ClusteredCache>
+  private cache?: ClusteredCache
+  private closed = false
   private listeners = new Set<(event: AdaptiveCacheEvent) => void>()
   private lastEvictions = 0
 
@@ -395,8 +397,11 @@ export class ClusteredLruAdaptiveCacheBackend implements AdaptiveCacheBackend {
   }
 
   public async quit(preserveSharedCache = false) {
+    this.closed = true
     if (!this.cachePromise) return undefined
-    const cache = await this.cachePromise
+    // Initialization may reject or stall after allocating the cache and its subscriptions.
+    let cache = this.cache
+    if (!cache) cache = await this.cachePromise
     if (preserveSharedCache) {
       cache.clearLocal?.()
       return undefined
@@ -405,10 +410,13 @@ export class ClusteredLruAdaptiveCacheBackend implements AdaptiveCacheBackend {
   }
 
   private async getCache() {
+    if (this.closed) throw new Error('Clustered LRU backend is closed')
     if (!this.cachePromise) {
       this.cachePromise = this.createCache()
     }
-    return this.cachePromise
+    const cache = await this.cachePromise
+    if (this.closed) throw new Error('Clustered LRU backend is closed')
+    return cache
   }
 
   private async createCache(): Promise<ClusteredCache> {
@@ -439,6 +447,7 @@ export class ClusteredLruAdaptiveCacheBackend implements AdaptiveCacheBackend {
       failsafe: this.options.failsafe || 'reject',
       ...(typeof this.options.localL1 !== 'undefined' ? { localL1: this.options.localL1 } : {}),
     }) as ClusteredCache
+    this.cache = cache
 
     await cache.healthCheck?.()
     return cache

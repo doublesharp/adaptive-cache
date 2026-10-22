@@ -2,6 +2,24 @@
 
 Notable changes by version. See [release history and process](docs/releases.md) for historical source revisions and upgrade instructions.
 
+## 0.2.1 - 2026-10-21
+
+### Fixed
+
+- Finish Redis and L1 cleanup when graceful shutdown rejects. Disconnect owned Redis connections, preserve caller-owned clients and the original shutdown error, and force teardown after an early close failure.
+- Preserve clear failures when temporary-helper cleanup also fails, and detach helper observers without flushing or closing borrowed custom backends.
+- Release allocated clustered caches after failed or stalled initialization, and prevent initialization from resuming cache operations after closure.
+- Disconnect owned Redis clients if backend initialization throws before the cache instance can be returned.
+
+### Added
+
+- Seeded fuzz and invariant tests for cache operation sequences, write fencing, shutdown faults, connection ownership, and temporary-helper observer cleanup. Run them with `pnpm run test:fuzz`; replay failures with `FUZZ_SEED` and `FUZZ_PATH`.
+
+### Upgrade notes
+
+- No additional cache-format migration from 0.2.0. When upgrading from 0.1.1 or earlier, also follow the [0.2.0 upgrade instructions](docs/releases.md#upgrading-to-020).
+- Continue handling rejected `close()` and `quit()` calls. Cleanup now proceeds after graceful shutdown fails, while callers retain the original error. Custom backend teardown should tolerate a subsequent forced call.
+
 ## 0.2.0 - 2026-10-17
 
 This release adds bounded loader and shutdown lifetimes and changes HTTP cache identity and Fastify registration behavior. Review the upgrade notes before deploying.

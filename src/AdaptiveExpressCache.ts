@@ -20,7 +20,7 @@ import {
 import { AdaptiveCache } from './AdaptiveCache'
 import { getDefaultCache } from './singleton'
 import { getAdaptiveCacheKey } from './utils'
-import { AdaptiveCacheLoadOptions, AdaptiveCacheOptions } from './types'
+import { AdaptiveCacheBackend, AdaptiveCacheLoadOptions, AdaptiveCacheOptions } from './types'
 
 export type ExpressRequestLike = {
   method?: string
@@ -69,6 +69,16 @@ const parseJsonBody = (body: any) => {
 
 const shouldShareDefaultRedisClient = (options: AdaptiveCacheOptions) =>
   !options.backend || options.backend === 'redis' || options.backend === 'l1-redis'
+
+// Temporary invalidators own their observer, but borrow the caller's backend.
+const borrowBackend = (backend: AdaptiveCacheBackend): AdaptiveCacheBackend =>
+  new Proxy({} as AdaptiveCacheBackend, {
+    get(_target, property) {
+      if (property === 'quit' || property === 'flush') return undefined
+      const value = Reflect.get(backend, property, backend)
+      return typeof value === 'function' ? value.bind(backend) : value
+    },
+  })
 
 const setCachedHeaders = (res: ExpressResponseLike, headers?: CachedHttpHeaders) => {
   for (const [name, value] of Object.entries(headers || {})) res.set(name, value)
@@ -363,6 +373,8 @@ export const clearAdaptiveCache = async (
     ? new AdaptiveCache(
         {
           ...options,
+          backend:
+            options.backend && typeof options.backend === 'object' ? borrowBackend(options.backend) : options.backend,
           keyPrefix: cachePrefix,
           redisPrefix: cachePrefix,
           lru: { ...options.lru, localL1: false },
@@ -371,9 +383,18 @@ export const clearAdaptiveCache = async (
       )
     : getDefaultCache()
 
+  let failure: { error: unknown } | undefined
   try {
     await cache.clear(adaptiveCacheKey)
-  } finally {
-    if (typeof options.backend === 'string' || (!options.backend && needsScopedWrapper)) await cache.quit(true)
+  } catch (error) {
+    failure = { error }
   }
+  if (needsScopedWrapper) {
+    try {
+      await cache.quit(true)
+    } catch (error) {
+      failure ??= { error }
+    }
+  }
+  if (failure) throw failure.error
 }

@@ -2,6 +2,14 @@
 
 The [changelog](../CHANGELOG.md) records release changes. The [README](../README.md) and [feature guide](cache-features.md) describe usage. A local version bump does not publish the package; publication follows the release process below.
 
+## Upgrading to 0.2.1
+
+Version 0.2.1 fixes cleanup after graceful Redis shutdown failures, failed or stalled clustered-cache initialization, and temporary invalidation-helper failures. It also adds fuzz and invariant tests. There is no additional cache-format migration from the prepared 0.2.0 source. Applications upgrading from the published 0.1.1 release or earlier must also follow the 0.2.0 instructions below.
+
+Continue awaiting and handling errors from `close()` and `quit()`. Cleanup now proceeds after graceful shutdown fails, preserving the original error. Owned Redis clients and internal subscribers are disconnected; injected clients remain caller-owned. Custom backend teardown should tolerate a graceful attempt followed by `quit(preserveSharedCache, true)` and release resources without waiting for stalled work.
+
+Temporary clear helpers detach their observers without flushing or closing borrowed custom backends. Clustered backends cannot resume operations after closure, even if initialization finishes later. See [shutdown behavior](cache-features.md#observe-and-drain-work) and the [0.2.1 changelog](../CHANGELOG.md#021---2026-10-21).
+
 ## Upgrading to 0.2.0
 
 These steps cover the HTTP identity, loader lifetime, ownership, and invalidation changes. They apply in addition to the older upgrade instructions below.
