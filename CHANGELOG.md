@@ -11,6 +11,10 @@ Notable changes by version. See [release history and process](docs/releases.md) 
 - Release allocated clustered caches after failed or stalled initialization, and prevent initialization from resuming cache operations after closure.
 - Disconnect owned Redis clients if backend initialization throws before the cache instance can be returned.
 
+### Added
+
+- Seeded fuzz and invariant tests for cache operation sequences, write fencing, shutdown faults, connection ownership, and temporary-helper observer cleanup. Run them with `pnpm run test:fuzz`; replay failures with `FUZZ_SEED` and `FUZZ_PATH`.
+
 ## 0.2.0 - 2026-10-17
 
 This release adds bounded loader and shutdown lifetimes and changes HTTP cache identity and Fastify registration behavior. Review the upgrade notes before deploying.

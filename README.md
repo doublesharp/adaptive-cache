@@ -599,6 +599,15 @@ The quality gate runs lint, type checks, tests with coverage, the package build,
 
 Run individual checks with `pnpm run lint`, `pnpm run typecheck`, `pnpm run test`, `pnpm run test:coverage`, or `pnpm run build`.
 
+Fuzz and invariant tests run in the normal test suite using [fast-check](https://fast-check.dev/). They compare generated operation sequences with a reference model across all three backends, using real Redis through Testcontainers and the installed clustered-LRU peer. Separate fault tests inject synchronous failures, rejected promises, stalled shutdowns, and concurrent close calls. Invariants cover invalidation and write fencing, complete cleanup, caller ownership, observer disposal, shared close outcomes, and rejection of work after closure. Docker must be running.
+
+```sh
+pnpm run test:fuzz
+FUZZ_RUNS=1000 FUZZ_SEED=20261021 pnpm run test:fuzz
+```
+
+Each property defaults to 100 generated cases. Failures report a seed, shrink path, and minimal counterexample. To replay one, set `FUZZ_SEED` and `FUZZ_PATH` to the reported values and select that property with `pnpm run test:fuzz -t 'property name'`. Keep confirmed failures as regression tests.
+
 `pnpm run bench:lru` measures primary-process and real worker-process clustered LRU operations, with and without local L1. It also checks retained worker invalidation and delivered IPC requests under backpressure. See the [clustered-LRU evaluation](docs/lru-cache-clustered-2.1.1.md) for a historical comparison and measurement method.
 
 `pnpm run bench:configs` compares the built-in backends against a local Redis instance. Each run uses a unique key prefix and leaves unrelated cache data alone.

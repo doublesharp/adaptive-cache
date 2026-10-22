@@ -6,6 +6,9 @@ import type {
   AdaptiveCacheBackendFetchInput,
   AdaptiveCacheBackendUpdateInput,
   AdaptiveCacheFetchResult,
+  AdaptiveCacheUpdateResult,
+  ShouldRefreshCacheUPDATE,
+  UpdateCacheAndReleaseLockUPDATED,
 } from '../../src/types'
 
 const getAdaptiveCacheKey = (...args: Parameters<typeof baseAdaptiveCacheKey>) =>
@@ -37,7 +40,7 @@ export class ControlledBackend implements AdaptiveCacheBackend {
     return { ...entry, ttl: 0, stale: true, staleAge: 1 }
   }
 
-  async update(input: AdaptiveCacheBackendUpdateInput) {
+  async update(input: AdaptiveCacheBackendUpdateInput): Promise<AdaptiveCacheUpdateResult> {
     this.updateInputs.push({ ...input })
     if (input.writeToken !== undefined && input.writeToken !== String(this.generation)) {
       return ['INVALIDATED', 0] as const
@@ -63,11 +66,11 @@ export class ControlledBackend implements AdaptiveCacheBackend {
     return []
   }
 
-  async shouldRefresh() {
+  async shouldRefresh(): Promise<ShouldRefreshCacheUPDATE> {
     return ['UPDATE', 'lock'] as const
   }
 
-  async releaseLock() {
+  async releaseLock(): Promise<UpdateCacheAndReleaseLockUPDATED> {
     return ['UPDATED'] as const
   }
 
@@ -92,7 +95,7 @@ export const queueStaleThenUnsafeResponse = async (
   requestPath: string,
 ) => {
   const key = getAdaptiveCacheKey(requestPath, {}, 'adaptive:')
-  await cache.set(key, encodeHttpResponse({ source: 'safe-stale' }, 200))
+  await cache.set(key, encodeHttpResponse({ source: 'safe-stale' }, 200, undefined))
   const safe = backend.entries.get(key) as AdaptiveCacheFetchResult
   await cache.set(key, encodeHttpResponse({ source: 'private-racer' }, 200, undefined, { 'cache-control': 'private' }))
   const unsafe = backend.entries.get(key) as AdaptiveCacheFetchResult
@@ -105,7 +108,7 @@ export const queueStaleThenLegacyResponse = async (
   requestPath: string,
 ) => {
   const key = getAdaptiveCacheKey(requestPath, {}, 'adaptive:')
-  await cache.set(key, encodeHttpResponse({ source: 'safe-stale' }, 200))
+  await cache.set(key, encodeHttpResponse({ source: 'safe-stale' }, 200, undefined))
   const safe = backend.entries.get(key) as AdaptiveCacheFetchResult
   backend.fetchQueue.push(
     { ...safe, ttl: 0, stale: true, staleAge: 1 },
