@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import Fastify from 'fastify'
 import express from 'express'
 import request from 'supertest'
@@ -16,6 +16,10 @@ const deferred = () => {
   })
   return { promise, resolve }
 }
+afterEach(() => {
+  vi.useRealTimers()
+  vi.restoreAllMocks()
+})
 const setup = async (framework: 'express' | 'fastify', options: AdaptiveExpressCacheOptions) => {
   const errors: unknown[] = []
   if (framework === 'express') {
@@ -59,10 +63,18 @@ const setup = async (framework: 'express' | 'fastify', options: AdaptiveExpressC
 
 describe('final HTTP lifetime regressions', () => {
   for (const framework of ['express', 'fastify'] as const) {
-    it(`${framework} keeps the shared source alive after the initiating caller deadline`, async () => {
+    it(`${framework} lets a later caller succeed after the initiating caller deadline`, async () => {
       const { cache } = controlledCache()
       const entered = deferred()
       const source = deferred()
+      const joined = deferred()
+      const getOrSet = cache.getOrSet.bind(cache)
+      let loads = 0
+      vi.spyOn(cache, 'getOrSet').mockImplementation((...args) => {
+        const loading = getOrSet(...args)
+        if (++loads === 2) joined.resolve()
+        return loading
+      })
       let calls = 0
       const app = await setup(framework, {
         cache,
@@ -74,12 +86,17 @@ describe('final HTTP lifetime regressions', () => {
           return 'shared source'
         },
       })
+      // Keep socket I/O real while advancing only cache deadlines. Waiting for
+      // both callers prevents machine load from turning this into two sources.
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
       const first = app.get()
       await entered.promise
-      await new Promise((resolve) => setTimeout(resolve, 80))
+      await vi.advanceTimersByTimeAsync(80)
       const second = app.get()
+      await joined.promise
+      await new Promise((resolve) => setImmediate(resolve))
+      await vi.advanceTimersByTimeAsync(100)
       expect((await first).status).toBe(500)
-      await new Promise((resolve) => setTimeout(resolve, 20))
       source.resolve()
       const later = await second
       await app.close()
@@ -87,7 +104,9 @@ describe('final HTTP lifetime regressions', () => {
       expect(later.body).toBe('shared source')
       expect(app.errors).toHaveLength(1)
       expect(app.errors[0]).toMatchObject({ name: 'TimeoutError' })
-      expect(calls).toBe(1)
+      // Fastify must validate the candidate through its origin's final hooks.
+      // An expired origin cannot authorize publication to the surviving waiter.
+      expect(calls).toBe(framework === 'fastify' ? 2 : 1)
     })
     it(`${framework} preserves the original bypass source exception and diagnostic`, async () => {
       const { cache } = controlledCache()
@@ -122,6 +141,7 @@ describe('final HTTP lifetime regressions', () => {
       it(`${framework} bounds the ${bypass} bypass and executes its source once`, async () => {
         const { cache, backend } = controlledCache()
         const source = deferred()
+        const entered = deferred()
         let calls = 0
         const headers: Record<string, string> = {}
         if (['authorization', 'cookie', 'range', 'if-range'].includes(bypass)) headers[bypass] = 'present'
@@ -146,20 +166,19 @@ describe('final HTTP lifetime regressions', () => {
             : {}),
           loader: async () => {
             calls++
+            entered.resolve()
             await source.promise
             return 'source'
           },
         })
         if (bypass === 'closed') await app.adapter.close()
+        vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
         const response = app.get(headers)
-        const result = await Promise.race([
-          response,
-          new Promise<'unbounded'>((resolve) => setTimeout(() => resolve('unbounded'), 200)),
-        ])
+        await entered.promise
+        await vi.advanceTimersByTimeAsync(20)
+        const result = await response
         source.resolve()
-        await response
         await app.close()
-        expect(result).not.toBe('unbounded')
         expect(result).toMatchObject({ status: 500 })
         expect(app.errors).toHaveLength(1)
         expect(app.errors[0]).toMatchObject({ name: 'TimeoutError' })

@@ -1,6 +1,5 @@
 import crypto from 'node:crypto'
-import { Readable } from 'node:stream'
-import { ReadableStream as WebReadableStream } from 'node:stream/web'
+import { types as utilTypes } from 'node:util'
 import { getAdaptiveCacheKey } from './utils'
 
 export type HttpRequestLike = {
@@ -32,16 +31,60 @@ export const snapshotHttpResponse = (response: HttpResponseLike) => {
 }
 
 export const normalizeHttpBody = (body: unknown): any =>
-  ArrayBuffer.isView(body) ? Buffer.from(body.buffer, body.byteOffset, body.byteLength) : body
+  !Buffer.isBuffer(body) && ArrayBuffer.isView(body) ? Buffer.from(body.buffer, body.byteOffset, body.byteLength) : body
+
+const getTypedArrayLength = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype), 'length')!.get!
+
+const isPlainHttpBody = (body: unknown, seen: Set<object>): boolean => {
+  if (body === undefined) return seen.size === 0
+  if (body === null || typeof body === 'string' || typeof body === 'boolean') return true
+  if (typeof body === 'number') return Number.isFinite(body) && !Object.is(body, -0)
+  if (typeof body !== 'object' || utilTypes.isProxy(body) || !Object.isExtensible(body)) return false
+  if (ArrayBuffer.isView(body)) {
+    // Only bare top-level byte transports have a replayable binary envelope.
+    // Nested views use JSON conversion; copying can lose their redaction or
+    // metadata, and JSON storage cannot retain their native type on a hit.
+    // Read the intrinsic length; subclasses can override the public accessor.
+    // DataView has no indexed elements, so any own numeric key is metadata.
+    const length = utilTypes.isDataView(body) ? 0 : getTypedArrayLength.call(body)
+    return (
+      seen.size === 0 &&
+      (!Buffer.isBuffer(body) || Object.getPrototypeOf(body) === Buffer.prototype) &&
+      // Check bounds too: large digit-only names can be ordinary metadata.
+      Reflect.ownKeys(body).every(
+        (name) => typeof name === 'string' && /^(0|[1-9]\d*)$/.test(name) && Number(name) < length,
+      )
+    )
+  }
+  const array = Array.isArray(body)
+  if (Object.getPrototypeOf(body) !== (array ? Array.prototype : Object.prototype)) return false
+  if (seen.has(body)) return false
+  seen.add(body)
+  // Inspect without invoking getters. Hidden metadata, accessors, and custom
+  // JSON conversion cannot be preserved by a plain JSON cache representation.
+  const descriptors = Object.getOwnPropertyDescriptors(body)
+  const names = Reflect.ownKeys(descriptors)
+  const cacheable = names.every((name) => {
+    const descriptor = descriptors[name as keyof typeof descriptors]
+    if (typeof name !== 'string' || !('value' in descriptor)) return false
+    if (array && name === 'length') return descriptor.writable
+    if (!descriptor.enumerable || !descriptor.writable || !descriptor.configurable) return false
+    if (array && (!/^(0|[1-9]\d*)$/.test(name) || Number(name) >= descriptors.length.value)) return false
+    return isPlainHttpBody(descriptor.value, seen)
+  })
+  // JSON fills array holes with null and duplicates shared object references.
+  // Both can change how later framework hooks interpret the cached body.
+  return cacheable && (!array || names.length === descriptors.length.value + 1)
+}
 
 export const isCacheableHttpBody = (body: unknown): boolean => {
-  if (body instanceof Readable || body instanceof WebReadableStream) return false
-  if (body === null || body === undefined || typeof body === 'string' || typeof body === 'boolean') return true
-  if (typeof body === 'number') return Number.isFinite(body)
-  if (ArrayBuffer.isView(body)) return true
-  if (Array.isArray(body)) return body.every(isCacheableHttpBody)
-  if (typeof body !== 'object' || Object.getPrototypeOf(body) !== Object.prototype) return false
-  return Object.values(body).every(isCacheableHttpBody)
+  try {
+    return isPlainHttpBody(body, new Set())
+  } catch {
+    // Inspection is optional. Deep values may still be handled successfully by
+    // the framework's serializer or preSerialization hooks.
+    return false
+  }
 }
 
 export type HttpPolicyOptions<Req extends HttpRequestLike = HttpRequestLike> = {
@@ -98,6 +141,7 @@ const hasCallerOwnedIsolation = <Req extends HttpRequestLike>(
 export const isRequestCacheable = <Req extends HttpRequestLike>(req: Req, options: HttpPolicyOptions<Req>) => {
   if (req.method && req.method.toUpperCase() !== 'GET') return false
   if (getRequestHeader(req, 'range') !== undefined || getRequestHeader(req, 'if-range') !== undefined) return false
+  if (hasCacheControlDirective(getRequestHeader(req, 'cache-control'), ['no-store', 'no-cache'])) return false
 
   const authorization = getRequestHeader(req, 'authorization')
   if (
@@ -115,14 +159,14 @@ export const isRequestCacheable = <Req extends HttpRequestLike>(req: Req, option
   return options.shouldCache?.(req) !== false
 }
 
-const cacheControlDisallowsStorage = (value: unknown) => {
+const hasCacheControlDirective = (value: unknown, names: string[]) => {
   const values = Array.isArray(value) ? value : [value]
   return values.some((header) =>
     String(header ?? '')
       .split(',')
       .some((directive) => {
         const name = directive.trim().split('=', 1)[0].toLowerCase()
-        return name === 'private' || name === 'no-store'
+        return names.includes(name)
       }),
   )
 }
@@ -148,7 +192,8 @@ export const isResponseCacheable = <Req extends HttpRequestLike>(
   const negative = response.statusCode === 404 && boundedNegativeTTL(options.negativeTTL, Number.MAX_SAFE_INTEGER)
   if (response.statusCode === 206) return false
   if (!((response.statusCode >= 200 && response.statusCode < 300) || negative)) return false
-  if (cacheControlDisallowsStorage(getResponseHeader(response, 'cache-control'))) return false
+  if (hasCacheControlDirective(getResponseHeader(response, 'cache-control'), ['private', 'no-store', 'no-cache']))
+    return false
   if (getResponseHeader(response, 'set-cookie') !== undefined) return false
 
   const declared = new Set(getDeclaredVaryHeaders(options.varyBy))

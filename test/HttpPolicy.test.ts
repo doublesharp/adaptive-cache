@@ -13,7 +13,7 @@ import {
   normalizeHeaderName,
   snapshotHttpResponse,
 } from '../src/httpPolicy'
-import { decodeHttpResponse, encodeHttpResponse } from '../src/httpResponse'
+import { cloneHttpBody, decodeHttpResponse, encodeHttpResponse } from '../src/httpResponse'
 
 const variedKey = (variation: unknown) =>
   buildHttpCacheKey({
@@ -26,6 +26,21 @@ const variedKey = (variation: unknown) =>
 const response = (headers: Record<string, unknown>, statusCode = 200) => ({
   statusCode,
   getHeader: (name: string) => headers[name],
+})
+
+it('clones mutable HTTP bodies without losing buffers, undefined, or own prototype-named keys', () => {
+  const original = { items: [{ buffer: Buffer.from('body') }, undefined], ...JSON.parse('{"__proto__":{"own":true}}') }
+  const copy = cloneHttpBody(original)
+  expect(copy).toEqual(original)
+  expect(Buffer.isBuffer(copy.items[0].buffer)).toBe(true)
+  expect(Object.hasOwn(copy, '__proto__')).toBe(true)
+  expect(Object.getPrototypeOf(copy)).toBe(Object.prototype)
+  copy.items[0].buffer[0] = 0
+  copy.items.push('extra')
+  copy.__proto__.own = false
+  expect(original.items).toHaveLength(2)
+  expect(original.items[0].buffer.toString()).toBe('body')
+  expect(original.__proto__.own).toBe(true)
 })
 
 describe('HTTP cache key canonicalization', () => {
@@ -120,13 +135,26 @@ describe('HTTP header lookup and cache policy', () => {
   })
 
   it('recognizes private and no-store directives across case, parameters, and multiple field values', () => {
-    for (const header of ['public, NO-STORE', 'max-age=10, private="authorization"', ['public', ' Private ']]) {
+    for (const header of [
+      'public, NO-STORE',
+      'max-age=10, private="authorization"',
+      ['public', ' Private '],
+      'no-cache',
+      'NO-CACHE="etag"',
+    ]) {
       expect(isResponseCacheable({}, response({ 'cache-control': header }), {})).toBe(false)
     }
     for (const header of ['', undefined, null, ['max-age=10', undefined], 'public, x-private=true']) {
       expect(isResponseCacheable({}, response({ 'cache-control': header }), {})).toBe(true)
     }
     expect(isResponseCacheable({}, response({ 'set-cookie': '' }), {})).toBe(false)
+  })
+
+  it('bypasses requests that prohibit storage or require validation', () => {
+    for (const header of ['no-store', 'NO-CACHE', ['public', ' no-store ']]) {
+      expect(isRequestCacheable({ headers: { 'cache-control': header } }, {})).toBe(false)
+    }
+    expect(isRequestCacheable({ headers: { 'cache-control': 'max-age=60' } }, {})).toBe(true)
   })
 
   it('combines Vary field values and rejects undeclared identity dimensions', () => {
@@ -225,8 +253,30 @@ describe('HTTP response snapshots and payload identity', () => {
     })
     expect(isCacheableHttpBody(node)).toBe(false)
     expect(isCacheableHttpBody(web)).toBe(false)
-    for (const body of [null, undefined, 'text', Buffer.from('bytes'), { data: [] }])
+    for (const body of [
+      null,
+      undefined,
+      'text',
+      Buffer.from('bytes'),
+      new Uint8Array([1]),
+      new DataView(new ArrayBuffer(1)),
+      { data: [] },
+    ])
       expect(isCacheableHttpBody(body)).toBe(true)
+    expect(isCacheableHttpBody({ nested: Buffer.from('bytes') })).toBe(false)
+    const view = new DataView(new ArrayBuffer(1))
+    Object.defineProperty(view, '0', { value: true })
+    expect(isCacheableHttpBody(view)).toBe(false)
+    const metadata = Buffer.from('bytes')
+    let lengthReads = 0
+    Object.defineProperty(metadata, 'length', {
+      get() {
+        lengthReads++
+        return 5
+      },
+    })
+    expect(isCacheableHttpBody(metadata)).toBe(false)
+    expect(lengthReads).toBe(0)
     node.destroy()
     await web.cancel()
   })

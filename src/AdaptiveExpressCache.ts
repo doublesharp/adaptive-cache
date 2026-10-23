@@ -5,7 +5,7 @@ import {
   unwrapHttpSourceError,
   UNSHAREABLE_HTTP_RESULT,
 } from './httpLoader'
-import { encodeHttpResponse, decodeHttpResponse, CachedHttpHeaders } from './httpResponse'
+import { encodeHttpResponse, decodeHttpResponse, cloneHttpBody, CachedHttpHeaders } from './httpResponse'
 import {
   boundedNegativeTTL,
   buildHttpCacheKey,
@@ -253,11 +253,12 @@ export const adaptiveExpressCache = <Req extends ExpressRequestLike = ExpressReq
           async () => {
             const body = await loadOnce()
             loadedThisRequest = true
+            loaderStoreAllowed = responseCacheable(req, loaderResponse)
+            if (!loaderStoreAllowed) return UNSHAREABLE_HTTP_RESULT
             loaderBodyCacheable = isCacheableHttpBody(body)
             if (!loaderBodyCacheable) return UNSHAREABLE_HTTP_RESULT
-            loaderStoreAllowed = responseCacheable(req, loaderResponse)
             return encodeHttpResponse(
-              body,
+              cloneHttpBody(body),
               loaderResponse.statusCode,
               loaderResponse.getHeader('content-type'),
               loaderResponse.headers,
@@ -273,10 +274,10 @@ export const adaptiveExpressCache = <Req extends ExpressRequestLike = ExpressReq
         }
         if (response.statusCode) res.statusCode = response.statusCode
         setCachedHeaders(res, response.headers)
-        return res.send(response.body)
+        return res.send(cloneHttpBody(response.body))
       }
 
-      const result = await cacheInstance.get(adaptiveCacheKey)
+      const result = await wait(() => cacheInstance.get(adaptiveCacheKey))
       let hitFailed = false
       if (result && !overrideCache) {
         try {
@@ -303,7 +304,7 @@ export const adaptiveExpressCache = <Req extends ExpressRequestLike = ExpressReq
       }
 
       if (includeHeaders && !hitFailed) res.set('X-Cache', overrideCache ? 'BYPASS' : 'MISS')
-      const writeFence = await captureWriteToken(cacheInstance)
+      const writeFence = await wait(() => captureWriteToken(cacheInstance))
       if (!writeFence.writable) return next()
 
       res.send = function (body: any) {
@@ -338,7 +339,8 @@ export const adaptiveExpressCache = <Req extends ExpressRequestLike = ExpressReq
 
       return next()
     } catch (error) {
-      if (error instanceof HttpSourceError || isHttpLoadCancellation(error)) return next(unwrapHttpSourceError(error))
+      if (loader && (error instanceof HttpSourceError || isHttpLoadCancellation(error)))
+        return next(unwrapHttpSourceError(error))
       cacheInstance.logger.error('adaptiveCache failed:', error)
       res.set('X-Cache', 'RETRY')
       if (!loader) return next()

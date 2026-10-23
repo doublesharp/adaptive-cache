@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest'
 import Fastify from 'fastify'
 import { Readable } from 'node:stream'
 import { ReadableStream } from 'node:stream/web'
+import { setImmediate } from 'node:timers/promises'
+import { gate } from './helpers/coreCache'
 import { AdaptiveCache } from '../src/AdaptiveCache'
 import { adaptiveFastifyCache } from '../src/AdaptiveFastifyCache'
 import { encodeHttpResponse } from '../src/httpResponse'
@@ -313,17 +315,19 @@ describe('Fastify HTTP loaders', () => {
     await fastify.close()
   })
 
-  it('keeps regenerated Fastify metadata separate from a stale response being served', async () => {
+  it('validates a Fastify refresh in the foreground without replaying stale metadata', async () => {
     const { backend, cache } = controlledCache()
     const key = getAdaptiveCacheKey('/loader-metadata', {}, 'adaptive:')
     await cache.set(key, encodeHttpResponse({ source: 'old' }, 202, 'application/json', { 'content-language': 'old' }))
     backend.staleKeys.add(key)
     let releaseRefresh!: () => void
     const barrier = new Promise<void>((resolve) => (releaseRefresh = resolve))
+    const entered = gate()
     const plugin = adaptiveFastifyCache({
       cache,
       staleWhileRevalidate: 30,
       loader: async () => {
+        entered.resolve()
         await barrier
         return { source: 'new' }
       },
@@ -332,13 +336,22 @@ describe('Fastify HTTP loaders', () => {
     await fastify.register(plugin)
     fastify.get('/loader-metadata', async () => 'handler')
 
-    const stale = await fastify.inject('/loader-metadata')
+    let completed = false
+    const refreshing = fastify.inject('/loader-metadata').then((response) => {
+      completed = true
+      return response
+    })
+    await entered.promise
+    await setImmediate()
+    expect(completed).toBe(false)
     releaseRefresh()
+    const refresh = await refreshing
     await plugin.flush()
     const refreshed = await fastify.inject('/loader-metadata')
 
-    expect(stale.statusCode).toBe(202)
-    expect(stale.headers['content-language']).toBe('old')
+    expect(refresh.statusCode).toBe(200)
+    expect(refresh.headers['content-language']).toBeUndefined()
+    expect(refresh.json()).toEqual({ source: 'new' })
     expect(refreshed.statusCode).toBe(200)
     expect(refreshed.headers['content-language']).toBeUndefined()
     expect(refreshed.json()).toEqual({ source: 'new' })
