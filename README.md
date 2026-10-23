@@ -142,6 +142,8 @@ fastify.get('/api/summary', async () => {
 
 Await adapter registration before declaring cached Fastify routes. Cache lookups and loaders run after validation and authorization hooks. Earlier routes remain uncached. A registration prefix limits caching to matching paths in that scope. See [HTTP identity and ownership](docs/cache-features.md#http-identity-and-ownership).
 
+Fastify stores and shares loader results only after the originating response completes its serialization and send hooks. Expired entries refresh in the foreground, even when `staleWhileRevalidate` is configured; `staleIfError` still applies. If the origin times out before validation, surviving waiters call their own loaders. This prevents late privacy headers from exposing a response to another request. Use direct `cache.getOrSet()` for request-independent background work.
+
 ## Direct API
 
 Use `AdaptiveCache` in jobs, services, or other code outside an HTTP handler.
