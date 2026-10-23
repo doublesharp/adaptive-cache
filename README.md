@@ -12,13 +12,13 @@ Use `@0xdoublesharp/adaptive-cache` with Express, Fastify, or directly in applic
 
 Redis is the default backend. Add a bounded LRU layer to keep hot payloads in memory, or use clustered LRU alone for a single server or Node cluster. Redis-backed modes provide atomic write and refresh-lock checks across hosts. Clustered LRU has weaker coordination guarantees and keeps state on one host.
 
-Use middleware for response caching and `getOrSet` for expensive work that needs concurrent request coalescing, stale refresh, or negative caching. Background refresh requires an explicit loader. The cache honors HTTP storage restrictions but does not generate `Cache-Control` headers.
+Use middleware for response caching and `getOrSet` for expensive work that needs concurrent request coalescing, stale refresh, or negative caching. Express loaders and direct `getOrSet` calls support background refresh. Fastify refreshes run in the foreground so response hooks can approve sharing and storage. The cache honors HTTP storage restrictions but does not generate `Cache-Control` headers.
 
 See the [feature guide](docs/cache-features.md) for detailed policies and the [upgrade guide](docs/releases.md) before changing an existing deployment.
 
 ## Installation
 
-Requires Node.js 22 or newer.
+Requires Node.js 22 or newer. Supports Express 4/5 and Fastify 4 or 5.12.6 and later in the 5.x series. When upgrading to 0.3.0, follow the [Fastify migration instructions](docs/releases.md#upgrading-to-030).
 
 Install the package:
 

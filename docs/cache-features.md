@@ -145,6 +145,8 @@ Custom backends may implement `fetchMany(inputs)`, returning one result or `null
 
 ## HTTP identity and ownership
 
+Upgrading Fastify deployments to 0.3.0 requires clearing old response entries or choosing a new namespace. Fastify 5 consumers need version 5.12.6 or later; Fastify 4 remains supported. Follow the [0.3.0 upgrade instructions](releases.md#upgrading-to-030).
+
 Default HTTP keys contain `<prefix>authority:<sha256(authority)>:<path>:<sha256(normalized-query)>:`. Authority comes from `Host`, with `:authority` as a fallback, and is trimmed and lowercased. The port remains part of identity. Forwarded host headers are not implicitly trusted. Query keys are sorted and `refresh` is ignored by default. Custom `key(request)` functions replace authority/path/query identity and must include any required host or tenant isolation themselves. Declared header variations append their own hash.
 
 Both middleware factories accept an injected `cache`, a custom `key(request)`, declared `varyBy` headers (or a function returning a key dimension), and `shouldCache(request, response?)`. Header dimensions are case-insensitive. Custom keys remain inside the middleware prefix.

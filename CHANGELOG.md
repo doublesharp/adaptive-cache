@@ -2,7 +2,9 @@
 
 Notable changes by version. See [release history and process](docs/releases.md) for historical source revisions and upgrade instructions.
 
-## Unreleased
+## 0.3.0 - 2026-10-23
+
+This release changes Fastify response storage and refresh behavior to enforce final response privacy. Follow the [0.3.0 upgrade instructions](docs/releases.md#upgrading-to-030) before deploying.
 
 ### Fixed
 

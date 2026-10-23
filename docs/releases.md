@@ -2,6 +2,17 @@
 
 The [changelog](../CHANGELOG.md) records release changes. The [README](../README.md) and [feature guide](cache-features.md) describe usage. A local version bump does not publish the package; publication follows the release process below.
 
+## Upgrading to 0.3.0
+
+Version 0.3.0 fixes HTTP response privacy and replay, backend TTL parity, and cache-write serialization. The minor version marks changes to Fastify refresh behavior and stored response representations. See the [0.3.0 changelog](../CHANGELOG.md#030---2026-10-23).
+
+1. Upgrade Fastify 5 to at least 5.12.6 for the header-name validation fix. Fastify 4 remains supported, as do Express 4/5 and Node.js 22 or newer.
+2. Clear existing Fastify response entries or select a fresh middleware `keyPrefix`. Use a distinct prefix while old and new application instances overlap; older entries can contain bodies that already passed send hooks. New entries retain the raw body and separate final policy metadata. Align an injected cache's `keyPrefix` with the middleware prefix, and use a distinct `lru.namespace` when isolating LRU-backed instances.
+3. Account for foreground Fastify loader refreshes even when `staleWhileRevalidate` is configured. The originating request must finish its response hooks before a candidate can be shared or stored. If that request times out before approval, surviving waiters call their own loaders within their remaining deadlines. `staleIfError`, Express background refresh, and direct `cache.getOrSet()` background refresh remain available.
+4. Expect custom serializers and raw bodies with getters, custom `toJSON`, hidden metadata, cycles, or nested binary values to bypass caching when replay cannot preserve their behavior. Each request still receives the framework's original response. See [HTTP identity and ownership](cache-features.md#http-identity-and-ownership) for the full eligibility rules and final-policy checks.
+
+There is no additional direct-cache payload migration from 0.2.1. Applications upgrading from 0.1.1 or earlier must also follow the 0.2.0 instructions below.
+
 ## Upgrading to 0.2.1
 
 Version 0.2.1 fixes cleanup after graceful Redis shutdown failures, failed or stalled clustered-cache initialization, and temporary invalidation-helper failures. It also adds fuzz and invariant tests. There is no additional cache-format migration from the prepared 0.2.0 source. Applications upgrading from the published 0.1.1 release or earlier must also follow the 0.2.0 instructions below.
