@@ -48,8 +48,7 @@ const isCompressed = (value: any) => {
   )
 }
 
-export async function encode(data: any, options: AdaptiveCacheOptions): Promise<string> {
-  const raw = encodePayload(data)
+export async function encode(data: any, options: AdaptiveCacheOptions, raw: string): Promise<string> {
   const settings = options.compression
   if (!settings) return options.compress === false ? raw : zlib.gzipSync(Buffer.from(raw)).toString('base64')
   const bytes = Buffer.from(raw)
@@ -79,11 +78,9 @@ export async function decode(encoded: string, options: AdaptiveCacheOptions): Pr
   return decodePayload(raw)
 }
 
-export function fingerprint(data: any, options: AdaptiveCacheOptions): string {
-  if (options.fingerprint) return crypto.createHash('sha256').update(options.fingerprint(data)).digest('hex')
-  let input = data
+export function fingerprint(data: any, options: AdaptiveCacheOptions, raw: string): string {
   if (options.ignoreFields?.length && data && typeof data === 'object' && !Buffer.isBuffer(data)) {
-    input = JSON.parse(JSON.stringify(data))
+    const input = decodePayload(raw)
     for (const path of options.ignoreFields) {
       const fields = path.split('.')
       let cursor = input
@@ -96,6 +93,7 @@ export function fingerprint(data: any, options: AdaptiveCacheOptions): string {
       }
       if (cursor && typeof cursor === 'object') delete cursor[fields[fields.length - 1]]
     }
+    return crypto.createHash('sha256').update(encodePayload(input)).digest('hex')
   }
-  return crypto.createHash('sha256').update(encodePayload(input)).digest('hex')
+  return crypto.createHash('sha256').update(raw).digest('hex')
 }

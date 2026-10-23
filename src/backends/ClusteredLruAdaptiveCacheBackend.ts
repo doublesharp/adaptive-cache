@@ -310,19 +310,42 @@ export class ClusteredLruAdaptiveCacheBackend implements AdaptiveCacheBackend {
       await this.advanceBarrier(redisPrefix)
       const cache = await this.getCache()
       const invalidatedKeys = new Set<string>()
-      for (const tag of tags) {
+      const invalidatedTags = new Set(tags)
+      const otherIndexes = new Map<string, Set<string>>()
+      for (const tag of invalidatedTags) {
         await cache.set(redisPrefix + '__adaptive:tag-epoch:' + tag, randomUUID(), { size: 64, updateL1: true })
         const tagKey = this.tagKey(redisPrefix, tag)
         const members = await liveTagMembers(cache, tagKey)
         for (const key of Object.keys(members)) {
+          if (invalidatedKeys.has(key)) continue
           const envelope = (await cache.get(key + 'data', { bypassL1: true })) as LruEnvelope | undefined
           // An expired or overwritten entry must not be invalidated by obsolete membership.
           if (envelope && !envelope.tags.includes(tag)) continue
           invalidatedKeys.add(key)
-          await this.removeTags(key, key + 'data')
+          // Drop the invalidated indexes once. Batch removals from every other
+          // index so a shared tag is not read and rewritten for each member.
+          if (envelope)
+            for (const otherTag of envelope.tags) {
+              if (envelope.prefix === redisPrefix && invalidatedTags.has(otherTag)) continue
+              const otherKey = this.tagKey(envelope.prefix, otherTag)
+              let removed = otherIndexes.get(otherKey)
+              if (!removed) otherIndexes.set(otherKey, (removed = new Set()))
+              removed.add(key)
+            }
           await Promise.all([cache.delete(key + 'data'), cache.delete(key + 'meta')])
         }
         await cache.delete(tagKey)
+      }
+      for (const [tagKey, removed] of otherIndexes) {
+        const next = await liveTagMembers(cache, tagKey)
+        for (const key of removed) delete next[key]
+        if (!Object.keys(next).length) await cache.delete(tagKey)
+        else
+          await cache.set(tagKey, next, {
+            ttl: Math.max(1, await cache.getRemainingTTL(tagKey)),
+            size: Buffer.byteLength(JSON.stringify(next)) + METADATA_SIZE_OVERHEAD_BYTES,
+            updateL1: true,
+          })
       }
       return [...invalidatedKeys]
     })

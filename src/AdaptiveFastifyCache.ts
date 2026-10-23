@@ -5,7 +5,7 @@ import {
   unwrapHttpSourceError,
   UNSHAREABLE_HTTP_RESULT,
 } from './httpLoader'
-import { encodeHttpResponse, decodeHttpResponse, CachedHttpHeaders } from './httpResponse'
+import { encodeHttpResponse, decodeHttpResponse, cloneHttpBody, CachedHttpHeaders } from './httpResponse'
 import {
   boundedNegativeTTL,
   buildHttpCacheKey,
@@ -14,6 +14,7 @@ import {
   isCacheableHttpBody,
   isRequestCacheable,
   isResponseCacheable,
+  normalizeHttpBody,
   snapshotHttpResponse,
 } from './httpPolicy'
 import { AdaptiveCache } from './AdaptiveCache'
@@ -34,10 +35,11 @@ export type FastifyReplyLike = HttpResponseLike & {
   header: (name: string, value: any) => FastifyReplyLike
   getHeaders?: () => Record<string, unknown>
   send: (payload?: any) => any
+  serializer: (fn: (payload: any) => string) => FastifyReplyLike
 }
 
 type FastifyInstanceLike = {
-  addHook: (name: 'onRoute' | 'onSend' | 'onClose', handler: (...args: any[]) => unknown) => unknown
+  addHook: (name: 'onRoute' | 'onResponse' | 'onError' | 'onClose', handler: (...args: any[]) => unknown) => unknown
 }
 
 export type AdaptiveFastifyCacheOptions<Req extends FastifyRequestLike = FastifyRequestLike> = AdaptiveCacheOptions &
@@ -64,6 +66,23 @@ const setCachedHeaders = (reply: FastifyReplyLike, headers?: CachedHttpHeaders) 
 const cachedResponseView = (response: ReturnType<typeof decodeHttpResponse>): HttpResponseLike => ({
   statusCode: response.statusCode || 200,
   getHeader: (name) => response.headers?.[name.toLowerCase()],
+})
+
+// The final status/headers determine storage policy, while each request must
+// enter Fastify's serialization and send hooks with the original representation.
+const finalizeResponse = (candidate: ReturnType<typeof encodeHttpResponse>, reply: FastifyReplyLike) => ({
+  ...encodeHttpResponse(
+    decodeHttpResponse(candidate).body,
+    reply.statusCode,
+    reply.getHeader?.('content-type'),
+    reply.getHeaders?.(),
+  ),
+  fastifyReplay: { statusCode: candidate.statusCode, headers: candidate.headers },
+})
+
+const replayResponse = (data: any) => ({
+  ...decodeHttpResponse(data),
+  ...(data?.__adaptiveCacheHttpResponse === 1 ? data.fastifyReplay : undefined),
 })
 
 const captureWriteToken = async (cache: AdaptiveCache): Promise<{ token?: string; writable: boolean }> => {
@@ -112,6 +131,9 @@ export const adaptiveFastifyCache = <Req extends FastifyRequestLike = FastifyReq
   const cacheHits = new WeakSet<FastifyRequestLike>()
   const bypassed = new WeakSet<FastifyRequestLike>()
   const loaderResponses = new WeakSet<FastifyRequestLike>()
+  const sendStarted = new WeakSet<FastifyRequestLike>()
+  const candidates = new WeakMap<FastifyRequestLike, ReturnType<typeof encodeHttpResponse>>()
+  const publications = new WeakMap<FastifyRequestLike, (reply?: FastifyReplyLike) => void>()
   const cacheKeys = new WeakMap<FastifyRequestLike, string>()
   const writeTokens = new WeakMap<FastifyRequestLike, string>()
   let closed = false
@@ -161,6 +183,7 @@ export const adaptiveFastifyCache = <Req extends FastifyRequestLike = FastifyReq
   const plugin = async (instance: FastifyInstanceLike, registrationOptions: { prefix?: string } = {}) => {
     const prefix = (registrationOptions.prefix || '').replace(/\/$/, '')
     const handleRequest = async (req: Req, reply: FastifyReplyLike) => {
+      let cancelPublication = () => {}
       const { loadOnce, wait, remaining } = createHttpLoader(
         () => loader!(req),
         cacheInstance.resolveLoadTimeoutMs(options),
@@ -210,21 +233,27 @@ export const adaptiveFastifyCache = <Req extends FastifyRequestLike = FastifyReq
               await wait(() => cacheInstance.clear(adaptiveCacheKey))
               existing = null
             } else if (!existing.stale) {
+              const response = replayResponse(existing.data)
               if (includeHeaders) {
                 reply.header('X-Cache', 'HIT')
                 reply.header('X-Cache-TTL', existing.ttl.toString())
               }
-              if (cached.statusCode) reply.statusCode = cached.statusCode
-              setCachedHeaders(reply, cached.headers)
-              return reply.send(cached.body)
+              if (response.statusCode) reply.statusCode = response.statusCode
+              setCachedHeaders(reply, response.headers)
+              return reply.send(response.body)
             }
           }
 
           if (includeHeaders) reply.header('X-Cache', overrideCache ? 'BYPASS' : 'MISS')
-          let loadedThisRequest = false
-          let loaderStoreAllowed = true
-          let loaderBodyCacheable = true
           const loaderResponse = snapshotHttpResponse(reply)
+          let active = true
+          let publish!: (value: unknown) => void
+          const publication = new Promise<unknown>((resolve) => (publish = resolve))
+          cancelPublication = () => {
+            active = false
+            publications.delete(req)
+            publish(UNSHAREABLE_HTTP_RESULT)
+          }
           const loadOptions: AdaptiveCacheLoadOptions<unknown> = {
             maxTTL: (data) => {
               const response = decodeHttpResponse(data)
@@ -232,7 +261,9 @@ export const adaptiveFastifyCache = <Req extends FastifyRequestLike = FastifyReq
               return response.statusCode === 404 ? boundedNegativeTTL(options.negativeTTL, value) : value
             },
             tags: Array.isArray(tags) ? tags : typeof tags === 'function' ? tags(req) : [],
-            staleWhileRevalidate: options.staleWhileRevalidate,
+            // A background result cannot pass this request's final response
+            // hooks after its stale response has already been sent.
+            staleWhileRevalidate: 0,
             staleIfError: options.staleIfError,
             negativeTTL: options.negativeTTL,
             isNegative: (data) => decodeHttpResponse(data).statusCode === 404,
@@ -240,42 +271,60 @@ export const adaptiveFastifyCache = <Req extends FastifyRequestLike = FastifyReq
             lockWaitTimeoutMs: options.lockWaitTimeoutMs,
             loadTimeoutMs: remaining(),
             shouldStore: (data: unknown) =>
-              loaderBodyCacheable &&
-              loaderStoreAllowed &&
-              responseCacheable(req, cachedResponseView(decodeHttpResponse(data))),
+              data !== UNSHAREABLE_HTTP_RESULT && responseCacheable(req, cachedResponseView(decodeHttpResponse(data))),
           }
           const value = await cacheInstance.getOrSet(
             adaptiveCacheKey,
             async () => {
               const body = await loadOnce()
-              loadedThisRequest = true
-              loaderBodyCacheable = isCacheableHttpBody(body)
-              if (!loaderBodyCacheable) return UNSHAREABLE_HTTP_RESULT
-              loaderStoreAllowed = responseCacheable(req, loaderResponse)
-              return encodeHttpResponse(
-                body,
+              if (!active || !responseCacheable(req, loaderResponse) || !isCacheableHttpBody(body))
+                return UNSHAREABLE_HTTP_RESULT
+              const candidate = encodeHttpResponse(
+                cloneHttpBody(body),
                 loaderResponse.statusCode,
                 loaderResponse.getHeader('content-type'),
                 loaderResponse.headers,
               )
+              publications.set(req, (finalReply) => {
+                publications.delete(req)
+                publish(
+                  active && finalReply && responseCacheable(req, finalReply)
+                    ? finalizeResponse(candidate, finalReply)
+                    : UNSHAREABLE_HTTP_RESULT,
+                )
+              })
+              // Start sending without awaiting the thenable reply. onResponse
+              // approves publication only after every serialization/send hook.
+              sendStarted.add(req)
+              try {
+                reply.send(cloneHttpBody(decodeHttpResponse(candidate).body))
+              } catch (error) {
+                sendStarted.delete(req)
+                cancelPublication()
+                throw new HttpSourceError(error)
+              }
+              return publication
             },
             loadOptions,
           )
+          if (sendStarted.has(req)) return reply
           if (value === UNSHAREABLE_HTTP_RESULT) return reply.send(await wait(loadOnce))
           const response = decodeHttpResponse(value)
-          if (!responseCacheable(req, cachedResponseView(response)) && !loadedThisRequest) {
+          if (!responseCacheable(req, cachedResponseView(response))) {
             await wait(() => cacheInstance.clear(adaptiveCacheKey))
             return reply.send(await wait(loadOnce))
           }
-          if (response.statusCode) reply.statusCode = response.statusCode
-          setCachedHeaders(reply, response.headers)
-          return reply.send(response.body)
+          const replay = replayResponse(value)
+          if (replay.statusCode) reply.statusCode = replay.statusCode
+          setCachedHeaders(reply, replay.headers)
+          return reply.send(cloneHttpBody(replay.body))
         }
 
-        const result = await cacheInstance.get(adaptiveCacheKey)
+        const result = await wait(() => cacheInstance.get(adaptiveCacheKey))
         if (result && !overrideCache) {
           const response = decodeHttpResponse(result.data)
           if (responseCacheable(req, cachedResponseView(response))) {
+            const replay = replayResponse(result.data)
             if (includeHeaders) {
               reply.header('X-Cache', 'HIT')
               reply.header('X-Cache-TTL', result.ttl.toString())
@@ -285,22 +334,25 @@ export const adaptiveFastifyCache = <Req extends FastifyRequestLike = FastifyReq
               reply.header('X-Cache-Last-Modified', result.metadata.lastChanged || 'unknown')
               reply.header('X-Cache-Refreshed', result.metadata.changeCount)
             }
-            if (response.statusCode) reply.statusCode = response.statusCode
-            setCachedHeaders(reply, response.headers)
+            if (replay.statusCode) reply.statusCode = replay.statusCode
+            setCachedHeaders(reply, replay.headers)
             cacheHits.add(req)
-            return reply.send(response.body)
+            return reply.send(replay.body)
           }
         }
 
         if (includeHeaders) reply.header('X-Cache', overrideCache ? 'BYPASS' : 'MISS')
-        const writeFence = await captureWriteToken(cacheInstance)
+        const writeFence = await wait(() => captureWriteToken(cacheInstance))
         if (!writeFence.writable) {
           bypassed.add(req)
           return
         }
         if (writeFence.token !== undefined) writeTokens.set(req, writeFence.token)
       } catch (error) {
-        if (error instanceof HttpSourceError || isHttpLoadCancellation(error)) throw unwrapHttpSourceError(error)
+        cancelPublication()
+        if (sendStarted.has(req)) return reply
+        if (loader && (error instanceof HttpSourceError || isHttpLoadCancellation(error)))
+          throw unwrapHttpSourceError(error)
         cacheInstance.logger.warn('adaptiveCache failed to fetch data:', error)
         reply.header('X-Cache', 'RETRY')
         bypassed.add(req)
@@ -321,26 +373,51 @@ export const adaptiveFastifyCache = <Req extends FastifyRequestLike = FastifyReq
         const originalHandler = route.handler
         route.handler = async function (req: Req, reply: FastifyReplyLike) {
           await handleRequest(req, reply)
-          if (reply.sent) return reply
+          if (reply.sent || sendStarted.has(req)) return reply
+          // A serializer installed by the skipped handler would be absent on
+          // hits. Preserve its output by leaving this response uncached.
+          const serializer = reply.serializer
+          reply.serializer = function (fn) {
+            bypassed.add(req)
+            return serializer.call(this, fn)
+          }
+          const send = reply.send
+          reply.send = function (body: unknown) {
+            reply.send = send
+            if (cacheKeys.has(req) && !bypassed.has(req) && isCacheableHttpBody(body)) {
+              const candidate = encodeHttpResponse(
+                cloneHttpBody(normalizeHttpBody(body)),
+                reply.statusCode,
+                reply.getHeader?.('content-type'),
+                reply.getHeaders?.(),
+              )
+              candidates.set(req, candidate)
+              body = cloneHttpBody(decodeHttpResponse(candidate).body)
+            }
+            return send.call(this, body)
+          }
           return originalHandler.call(this, req, reply)
         }
       },
     )
 
-    instance.addHook('onSend', async (req: Req, reply: FastifyReplyLike, payload: any) => {
+    instance.addHook('onError', async (req: Req) => {
+      bypassed.add(req)
+      publications.get(req)?.()
+    })
+
+    instance.addHook('onResponse', async (req: Req, reply: FastifyReplyLike) => {
+      publications.get(req)?.(reply)
       if (req.method && req.method.toUpperCase() !== 'GET') return
       if (cacheHits.has(req) || bypassed.has(req) || loaderResponses.has(req)) return
-      if (payload !== null && typeof payload !== 'string' && !Buffer.isBuffer(payload)) return
+      const candidate = candidates.get(req)
+      if (!candidate) return
       const adaptiveCacheKey = cacheKeys.get(req)
       if (!adaptiveCacheKey || !responseCacheable(req, reply)) return
 
-      const response = encodeHttpResponse(
-        payload,
-        reply.statusCode,
-        reply.getHeader?.('content-type'),
-        reply.getHeaders?.(),
-      )
+      const response = finalizeResponse(candidate, reply)
       const update = async () => {
+        const payload = decodeHttpResponse(candidate).body
         let body = payload
         if (typeof payload === 'string') {
           try {
@@ -359,6 +436,7 @@ export const adaptiveFastifyCache = <Req extends FastifyRequestLike = FastifyReq
           maxTTL: currentMaxTTL,
           tags: requestTags,
           writeToken: writeTokens.get(req),
+          ...(reply.statusCode === 404 ? { staleTTL: 0 } : {}),
         })
       }
       trackWrite(update().catch((error) => cacheInstance.logger.error('Cache update failed:', error)))

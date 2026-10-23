@@ -2,6 +2,16 @@ import { normalizeHttpBody } from './httpPolicy'
 
 export type CachedHttpHeaders = Record<string, string | string[]>
 
+// Coalesced loads share their result, but framework hooks may mutate a body.
+// Keep each response independent while preserving nested buffers and undefined.
+export const cloneHttpBody = (body: any): any => {
+  if (Buffer.isBuffer(body)) return Buffer.from(body)
+  if (Array.isArray(body)) return body.map(cloneHttpBody)
+  if (body && typeof body === 'object')
+    return Object.fromEntries(Object.entries(body).map(([key, value]) => [key, cloneHttpBody(value)]))
+  return body
+}
+
 const REPLAYABLE_HEADERS = new Set([
   'cache-control',
   'content-encoding',

@@ -101,8 +101,11 @@ describe('cache state invariants', () => {
                 }
               }
               // Check every key after every operation, including keys it should leave alone.
+              // Batch the invariant snapshot; generated get operations still exercise get().
+              const snapshot = await cache.getMany([...keys])
+              expect([...snapshot.keys()]).toEqual(keys)
               for (const key of keys) {
-                const actual = await cache.get(key)
+                const actual = snapshot.get(key)
                 if (model.has(key)) expect(actual?.data).toEqual(model.get(key)!.value)
                 else expect(actual).toBeNull()
               }

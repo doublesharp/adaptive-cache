@@ -2,6 +2,33 @@
 
 Notable changes by version. See [release history and process](docs/releases.md) for historical source revisions and upgrade instructions.
 
+## Unreleased
+
+### Fixed
+
+- Update Fastify to 5.12.7 to address header-name validation bypass ([GHSA-389g-gv7q-r4x8](https://github.com/fastify/fastify/security/advisories/GHSA-389g-gv7q-r4x8)). Regression tests cover forbidden headers before both cold and warm handler/loader cache access.
+- Fingerprint and store the same serialized payload, including when getters or `toJSON()` change between calls. Apply `ignoreFields` to that snapshot without mutating the input.
+- Reject empty `setMany()` and `clearMany()` calls after shutdown, consistently with other cache operations.
+- Keep policy-rejected HTTP loader bodies private to each caller, clone shared JSON bodies before framework hooks, and honor request `no-store`/`no-cache` and response `no-cache`.
+- Bound ordinary middleware cache reads and write-token waits by the HTTP load deadline.
+- Validate Fastify storage and sharing against final response policy, including late hooks, and replay raw responses so send transformations run once.
+- Preserve custom JSON redaction, getter behavior, handler-installed Fastify serializers, and framework handling of circular bodies by bypassing unsafe raw representations.
+- Keep L1 Redis reads available while its invalidation subscriber is connecting. Preserve revision validation on every L1 hit.
+- Reset every LRU TTL policy on namespace invalidation and preserve fractional adaptive TTLs in Redis results.
+- Expire FakeRedis metadata and other stored types naturally, with regression contracts against real Redis.
+
+### Changed
+
+- Serialize payloads once per write, removing duplicate JSON work from the default fingerprint path.
+- Batch LRU tag-index cleanup, removing quadratic rewrites when invalidating large tags.
+- Make HTTP deadline regressions deterministic while retaining real Express and Fastify requests. Exercise batched reads in the generated cache-state invariant checks.
+
+### Compatibility notes
+
+- Fastify 5 consumers require version 5.12.6 or later for the header-name validation fix. Fastify 4 remains supported.
+- Fastify loader refreshes now run in the foreground even when `staleWhileRevalidate` is configured. A timed-out origin cannot approve its result for sharing; surviving waiters call their own loaders. `staleIfError` and direct-cache background refresh remain supported. See [HTTP identity and ownership](docs/cache-features.md#http-identity-and-ownership).
+- Clear existing Fastify response entries or select a new middleware namespace on upgrade. Older entries may contain bodies that already passed send hooks; new entries retain the raw representation and separate final policy metadata.
+
 ## 0.2.1 - 2026-10-21
 
 ### Fixed

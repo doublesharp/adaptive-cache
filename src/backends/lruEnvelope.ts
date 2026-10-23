@@ -42,11 +42,7 @@ export const calculateNextMetadata = (
   nowMs = Date.now(),
   namespaceGeneration?: string,
 ) => {
-  if (
-    previous?.ttlPolicyState &&
-    namespaceGeneration !== undefined &&
-    previous.namespaceGeneration !== namespaceGeneration
-  )
+  if (previous && namespaceGeneration !== undefined && previous.namespaceGeneration !== namespaceGeneration)
     previous = undefined
   const isChanged = !previous || previous.hash !== hash
   let dataTTL = toFiniteNumber(previous?.dataTTL, initialTTL)
@@ -93,9 +89,8 @@ export function metadataFromEnvelope(envelope: LruEnvelope): AdaptiveCacheMetada
     lastChanged: envelope.lastChanged,
     changeCount: envelope.changeCount,
     hash: envelope.hash,
-    ...(envelope.ttlPolicyState
-      ? { ttlPolicyState: envelope.ttlPolicyState, namespaceGeneration: envelope.namespaceGeneration }
-      : {}),
+    ...(envelope.namespaceGeneration ? { namespaceGeneration: envelope.namespaceGeneration } : {}),
+    ...(envelope.ttlPolicyState ? { ttlPolicyState: envelope.ttlPolicyState } : {}),
   }
 }
 
@@ -112,9 +107,8 @@ export function createEnvelope(
     encodedData: input.encodedData,
     writeToken: input.writeToken,
     hash: metadata.hash,
-    ...(metadata.ttlPolicyState
-      ? { ttlPolicyState: metadata.ttlPolicyState, namespaceGeneration: metadata.namespaceGeneration }
-      : {}),
+    ...(metadata.namespaceGeneration ? { namespaceGeneration: metadata.namespaceGeneration } : {}),
+    ...(metadata.ttlPolicyState ? { ttlPolicyState: metadata.ttlPolicyState } : {}),
     dataTTL,
     lastChanged: toFiniteNumber(metadata.lastChanged, 0),
     changeCount: toFiniteNumber(metadata.changeCount, 0),
