@@ -1,7 +1,7 @@
 import Redis from 'ioredis'
 import crypto from 'node:crypto'
 import { performance } from 'node:perf_hooks'
-import { encode, decode, fingerprint } from './payload'
+import { encode, decode, encodePayload, fingerprint } from './payload'
 import { Logger } from './lib/logger'
 import { CacheLoader } from './CacheLoader'
 import { normalizeTtlPolicy, validateTtlPolicySeed } from './ttlPolicy'
@@ -303,8 +303,14 @@ export class AdaptiveCache {
       const writeToken = options.writeToken ?? (await this.backend.captureWriteToken?.(this.getKeyPrefix()))
       if (this.options.compression?.async && writeToken === undefined)
         throw new Error('Backend does not support captureWriteToken required for asynchronous encoding')
-      const responseHash = fingerprint(data, this.options)
-      const encodedData = await encode(data, this.options)
+      // Hash and encode one snapshot so getters/toJSON cannot change the stored
+      // value between fingerprinting and serialization.
+      const customHash = this.options.fingerprint
+        ? crypto.createHash('sha256').update(this.options.fingerprint(data)).digest('hex')
+        : undefined
+      const payload = encodePayload(data)
+      const responseHash = customHash ?? fingerprint(data, this.options, payload)
+      const encodedData = await encode(data, this.options, payload)
       signal?.throwIfAborted()
       const result = await this.backend.update({
         key,
@@ -383,10 +389,12 @@ export class AdaptiveCache {
   public async setMany(
     entries: Array<{ key: string; data: unknown; options?: AdaptiveCacheSetOptions }>,
   ): Promise<void> {
+    this.assertOpen()
     await Promise.all(entries.map(({ key, data, options }) => this.set(key, data, options)))
   }
 
   public async clearMany(keys: string[]): Promise<void> {
+    this.assertOpen()
     await Promise.all(keys.map((key) => this.clear(key)))
   }
 

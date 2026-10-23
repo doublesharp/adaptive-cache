@@ -25,6 +25,12 @@ afterEach(async () => {
 })
 
 describe('release core fixes', () => {
+  it.each(['getMany', 'setMany', 'clearMany'] as const)('rejects empty %s after shutdown', async (method) => {
+    const { cache } = create()
+    await cache.close()
+    await expect(cache[method]([])).rejects.toThrow('closed')
+  })
+
   it('rejects fractional metadata TTL before creating a backend', () => {
     // A Redis EXPIRE failure occurs after Lua has already written metadata.
     expect(() => new AdaptiveCache({ backend: 'clustered-lru', metaTTL: 0.5, logLevel: 'silent' })).toThrow(

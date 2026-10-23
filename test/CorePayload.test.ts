@@ -8,6 +8,43 @@ import { registerCoreCacheFixture } from './helpers/coreCache'
 const { create } = registerCoreCacheFixture()
 
 describe('core payload and typed APIs', () => {
+  it('evaluates a custom fingerprint before toJSON can mutate the original object', async () => {
+    const cache = create({ fingerprint: (value) => value.identity, includeDebugHeaders: true })
+    const value = {
+      identity: 'before',
+      toJSON() {
+        const snapshot = { identity: this.identity }
+        this.identity = 'after'
+        return snapshot
+      },
+    }
+    await cache.set('custom-snapshot', value)
+    expect((await cache.get('custom-snapshot'))?.data).toEqual({ identity: 'before' })
+    await cache.set('custom-snapshot', { identity: 'after' })
+    expect((await cache.get('custom-snapshot'))?.metadata).toMatchObject({ dataTTL: 2, changeCount: 2 })
+  })
+
+  it.each([{ ignoreFields: undefined }, { ignoreFields: ['volatile'] }])(
+    'fingerprints the stored snapshot with %j',
+    async ({ ignoreFields }) => {
+      const cache = create({ ignoreFields, compress: false, includeDebugHeaders: true })
+      let serializations = 0
+      const value = {
+        toJSON() {
+          return { version: ++serializations, volatile: 'first' }
+        },
+      }
+
+      await cache.set('snapshot', value)
+      expect(serializations).toBe(1)
+      expect((await cache.get('snapshot'))?.data).toEqual({ version: 1, volatile: 'first' })
+
+      // Rewriting the stored value must count as unchanged content.
+      await cache.set('snapshot', { version: 1, volatile: 'first' })
+      expect((await cache.get('snapshot'))?.metadata).toMatchObject({ dataTTL: 4, changeCount: 1 })
+    },
+  )
+
   it('round trips selective async compression across differently configured readers', async () => {
     const backend = new ClusteredLruAdaptiveCacheBackend({ namespace: crypto.randomUUID() }, new Logger('silent'))
     const writer = create({
