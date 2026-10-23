@@ -29,7 +29,7 @@ interface RedisFeatureCommands {
       number?,
     ]
   >
-  adaptiveCacheUpdate(...args: string[]): Promise<AdaptiveCacheUpdateResult>
+  adaptiveCacheUpdate(...args: string[]): ReturnType<Redis['adaptiveCacheUpdate']>
   adaptiveCacheInvalidate(...args: string[]): Promise<string[]>
 }
 
@@ -185,8 +185,8 @@ export class RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
       JSON.stringify(normalizeTtlPolicy(input.ttlPolicy)),
     )
 
-    result[1] = Number(result[1])
-    return result
+    const [status, ttl, ...metadata] = result
+    return [status, Number(ttl), ...metadata]
   }
 
   public async captureWriteToken(redisPrefix: string) {

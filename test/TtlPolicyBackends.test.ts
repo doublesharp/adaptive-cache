@@ -11,6 +11,12 @@ import { Logger } from '../src/lib/logger'
 import type { AdaptiveCacheBackend, AdaptiveCacheBackendUpdateInput, AdaptiveCacheTtlPolicy } from '../src/types'
 
 const logger = new Logger('silent')
+const policies: Array<{ name: string; policy?: AdaptiveCacheTtlPolicy }> = [
+  { name: 'default adaptive' },
+  { name: 'explicit adaptive', policy: { type: 'adaptive' } },
+  { name: 'aimd', policy: { type: 'aimd' } },
+  { name: 'ewma', policy: { type: 'ewma', halfLifeSeconds: 10 } },
+]
 const input = (ttlPolicy?: AdaptiveCacheTtlPolicy): AdaptiveCacheBackendUpdateInput => ({
   key: 'policy:item:',
   dataKey: 'policy:item:data',
@@ -137,10 +143,10 @@ describe('TTL policy backend parity', () => {
     }
   })
 
-  it('keeps low TTL caps and write fencing authoritative for both new policies', async () => {
+  it('keeps fractional TTL caps and write fencing authoritative for every policy', async () => {
     for (const backend of [redis, lru])
-      for (const type of ['aimd', 'ewma'] as const) {
-        const value = { ...input({ type }), initialTTL: 0.5, maxTTL: 0.5 }
+      for (const { policy } of policies) {
+        const value = { ...input(policy), initialTTL: 0.5, maxTTL: 0.5 }
         const token = await backend.captureWriteToken(value.redisPrefix)
         await backend.clear(value.key, value.dataKey, value.metaKey, value.redisPrefix)
         expect(await backend.update({ ...value, writeToken: token })).toEqual(['INVALIDATED', 0])
@@ -185,19 +191,29 @@ describe('TTL policy backend parity', () => {
     expect(results).toEqual([10, 20, 25])
   })
 
-  it('resets namespace history even when the payload has expired before invalidation', async () => {
-    const value = input({ type: 'aimd' })
-    for (const backend of [redis, lru]) {
-      await backend.update(value)
-      await backend.update(value)
-    }
-    await client.del(value.dataKey)
-    await (lru as any).getCache().then((cache: any) => cache.delete(value.dataKey))
-    for (const backend of [redis, lru]) {
-      await backend.invalidateNamespace(value.redisPrefix)
-      expect((await backend.update(value))[1]).toBe(5)
-    }
-  })
+  it.each(policies.flatMap((entry) => [false, true].map((expired) => ({ ...entry, expired }))))(
+    'resets $name namespace history with expired payload = $expired',
+    async ({ policy, expired }) => {
+      const value = input(policy)
+      for (const backend of [redis, lru]) expect((await backend.update(value))[1]).toBe(5)
+      await clock(now + 10000)
+      for (const backend of [redis, lru]) expect((await backend.update(value))[1]).toBe(10)
+      if (expired) {
+        // Expire the actual payload while leaving its longer-lived metadata intact.
+        await client.pexpire(value.dataKey, 1)
+        await new Promise((resolve) => setTimeout(resolve, 10))
+        await clock(now + 10001)
+        expect(await client.get(value.dataKey)).toBeNull()
+        expect(await lru.fetch({ ...value, includeDebugHeaders: true })).toBeNull()
+      }
+      for (const backend of [redis, lru]) {
+        await backend.invalidateNamespace(value.redisPrefix)
+        const result = await backend.update(value)
+        expect(result[1]).toBe(5)
+        expect(result[3]).toBe(1)
+      }
+    },
+  )
 
   it('preserves small AIMD increases when Redis returns its policy TTL', async () => {
     const value = input({ type: 'aimd', increaseSeconds: 1e-12 })

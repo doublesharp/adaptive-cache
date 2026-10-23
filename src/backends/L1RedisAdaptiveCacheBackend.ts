@@ -36,7 +36,6 @@ export class L1RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
   private readonly channel: string
   private readonly redisPrefix: string
   private subscriber?: Redis
-  private subscriberReady?: Promise<void>
 
   constructor(
     redis: RedisAdaptiveCacheBackend,
@@ -74,7 +73,8 @@ export class L1RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
     }
     if (l1Result) await this.lru.deleteKeys([input.key])
 
-    await this.subscriberReady
+    // Pub/sub accelerates eviction; Redis revision checks keep reads coherent
+    // even while the subscriber is unavailable or still connecting.
     const generation = this.state.generation
     const redisResult = await this.redis.fetch(input)
     if (redisResult && redisResult.ttl > 0 && generation === this.state.generation) {
@@ -244,12 +244,9 @@ export class L1RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
       this.subscriber.on('error', (err) => {
         this.logger.warn('Redis L1 invalidation subscriber error:', err)
       })
-      this.subscriberReady = this.subscriber
-        .subscribe(this.channel)
-        .then(() => undefined)
-        .catch((err) => {
-          this.logger.warn('Failed to subscribe to Redis L1 invalidations:', err)
-        })
+      this.subscriber.subscribe(this.channel).catch((err) => {
+        this.logger.warn('Failed to subscribe to Redis L1 invalidations:', err)
+      })
     } catch (err) {
       this.logger.warn('Failed to start Redis L1 invalidation subscriber:', err)
     }

@@ -1,5 +1,6 @@
 import express, { type Request } from 'express'
 import fastify, { type FastifyRequest } from 'fastify'
+import type Redis from 'ioredis'
 import {
   AdaptiveCache,
   adaptiveExpressCache,
@@ -40,3 +41,15 @@ const typedFastify = adaptiveFastifyCache<FastifyRequest<{ Params: { id: string 
   loader: async (req) => ({ id: req.params.id, tenant: req.tenant }),
 })
 void fastify().register(typedFastify)
+
+// Raw Redis replies use decimal text to preserve fractional TTLs; cache writes
+// continue to expose a numeric TTL to package consumers.
+void cache.set('typed-write', {}).then((result) => result[1].toFixed(2))
+const checkRawRedisTTL = async (redis: Redis) => {
+  const result = await redis.adaptiveCacheUpdate('data', 'meta', 'hash', '{}', '0.5', '1', '2', '60')
+  const ttl: string | number = result[1]
+  void ttl
+  // @ts-expect-error Raw RESP TTLs require conversion before arithmetic.
+  result[1].toFixed(2)
+}
+void checkRawRedisTTL

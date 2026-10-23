@@ -40,7 +40,7 @@ declare module 'ioredis' {
     ): Promise<
       [
         status: string | false,
-        dataTTL: number,
+        dataTTL: string | number,
         lastChanged?: string | number | false,
         changeCount?: string | number | false,
         hash?: string | false,

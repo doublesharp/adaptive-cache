@@ -76,7 +76,7 @@ describe('AdaptiveCache Class & Utils', () => {
   })
 
   describe('Lua Scripts', () => {
-    it('adaptive cache lua scripts should preserve old tuple fields and include metadata', async () => {
+    it('adaptive cache lua scripts preserve tuple positions and encode update TTLs as decimal text', async () => {
       const cache = new cacheModule.AdaptiveCache({ initialTTL: 10, includeDebugHeaders: true })
 
       await cache.set('lua-tuple-key', { a: 1 })
@@ -101,7 +101,9 @@ describe('AdaptiveCache Class & Utils', () => {
       )
 
       expect(updateTuple[0]).toBe('CACHED')
-      expect(updateTuple[1]).toEqual(expect.any(Number))
+      // Raw RESP integer replies lose fractional seconds. The backend converts
+      // this decimal field to a number at the public API boundary.
+      expect(updateTuple[1]).toBe('5')
       expect(updateTuple[2]).toBeDefined()
       expect(updateTuple[3]).toBeDefined()
       expect(updateTuple[4]).toBe('hash-1')

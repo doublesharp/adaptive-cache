@@ -2,11 +2,10 @@ import { calculateNextMetadata } from '../../src/backends/lruEnvelope'
 import { randomUUID } from 'node:crypto'
 import { URL } from 'node:url'
 
-type PipelineCommand = () => void
+type PipelineCommand = () => unknown | Promise<unknown>
 
 interface StoredValue {
   value: string
-  expiresAt?: number
 }
 
 export class FakeRedis {
@@ -18,6 +17,7 @@ export class FakeRedis {
     hashes: new Map<string, Record<string, string>>(),
     sets: new Map<string, Set<string>>(),
     sortedSets: new Map<string, Map<string, number>>(),
+    expiresAt: new Map<string, number>(),
   }
   public published: Array<{ channel: string; payload: string }> = []
   public subscribedChannels: string[] = []
@@ -84,17 +84,12 @@ export class FakeRedis {
   }
 
   async get(key: string) {
-    const entry = this.stores.values.get(key)
-    if (!entry) return null
-    if (entry.expiresAt && entry.expiresAt <= Date.now()) {
-      this.stores.values.delete(key)
-      return null
-    }
-    return entry.value
+    this.expireKey(key)
+    return this.stores.values.get(key)?.value ?? null
   }
 
   async setnx(key: string, value: string) {
-    if ((await this.get(key)) !== null) return 0
+    if (await this.exists(key)) return 0
     await this.set(key, value)
     return 1
   }
@@ -104,29 +99,51 @@ export class FakeRedis {
   }
 
   async set(key: string, value: string | number, mode?: string, ttl?: number) {
-    const entry: StoredValue = { value: String(value) }
-    if (mode === 'EX' && typeof ttl === 'number') entry.expiresAt = Date.now() + ttl * 1000
-    if (mode === 'PX' && typeof ttl === 'number') entry.expiresAt = Date.now() + ttl
-    this.stores.values.set(key, entry)
+    this.deleteKey(key)
+    this.stores.values.set(key, { value: String(value) })
+    if (mode === 'EX' && typeof ttl === 'number') this.stores.expiresAt.set(key, Date.now() + ttl * 1000)
+    if (mode === 'PX' && typeof ttl === 'number') this.stores.expiresAt.set(key, Date.now() + ttl)
     return 'OK'
   }
 
   async del(...keys: string[]) {
     let deleted = 0
     for (const key of keys) {
-      if (this.stores.values.delete(key)) deleted += 1
-      if (this.stores.hashes.delete(key)) deleted += 1
-      if (this.stores.sets.delete(key)) deleted += 1
-      if (this.stores.sortedSets.delete(key)) deleted += 1
+      this.expireKey(key)
+      deleted += this.deleteKey(key)
     }
     return deleted
   }
 
-  async pexpire(_key: string, _milliseconds: number) {
+  private deleteKey(key: string) {
+    const deleted = [
+      this.stores.values.delete(key),
+      this.stores.hashes.delete(key),
+      this.stores.sets.delete(key),
+      this.stores.sortedSets.delete(key),
+    ].some(Boolean)
+    this.stores.expiresAt.delete(key)
+    return deleted ? 1 : 0
+  }
+
+  private expireKey(key: string) {
+    const expiresAt = this.stores.expiresAt.get(key)
+    if (expiresAt !== undefined && expiresAt <= Date.now()) this.deleteKey(key)
+  }
+
+  async expire(key: string, seconds: number) {
+    return this.pexpire(key, seconds * 1000)
+  }
+
+  async pexpire(key: string, milliseconds: number) {
+    if (!(await this.exists(key))) return 0
+    if (milliseconds <= 0) return this.deleteKey(key)
+    this.stores.expiresAt.set(key, Date.now() + milliseconds)
     return 1
   }
 
   async exists(key: string) {
+    this.expireKey(key)
     return this.stores.values.has(key) ||
       this.stores.hashes.has(key) ||
       this.stores.sets.has(key) ||
@@ -136,14 +153,17 @@ export class FakeRedis {
   }
 
   async hgetall(key: string) {
+    this.expireKey(key)
     return this.stores.hashes.get(key) || {}
   }
 
   async smembers(key: string) {
+    this.expireKey(key)
     return Array.from(this.stores.sets.get(key) || [])
   }
 
   async zrange(key: string, start: number, stop: number) {
+    this.expireKey(key)
     const members = [...(this.stores.sortedSets.get(key) || [])].sort((a, b) => a[1] - b[1]).map(([member]) => member)
     return members.slice(start, stop === -1 ? undefined : stop + 1)
   }
@@ -163,6 +183,7 @@ export class FakeRedis {
     this.stores.hashes.clear()
     this.stores.sets.clear()
     this.stores.sortedSets.clear()
+    this.stores.expiresAt.clear()
   }
 
   async quit() {
@@ -175,6 +196,7 @@ export class FakeRedis {
     return {
       sadd: (key: string, value: string) => {
         commands.push(() => {
+          this.expireKey(key)
           const set = this.stores.sets.get(key) || new Set<string>()
           set.add(value)
           this.stores.sets.set(key, set)
@@ -182,24 +204,15 @@ export class FakeRedis {
         return this
       },
       expire: (key: string, ttl: number) => {
-        commands.push(() => {
-          const value = this.stores.values.get(key)
-          if (value) value.expiresAt = Date.now() + ttl * 1000
-        })
+        commands.push(() => this.expire(key, ttl))
         return this
       },
       del: (...keys: string[]) => {
-        commands.push(() => {
-          for (const key of keys) {
-            this.stores.values.delete(key)
-            this.stores.hashes.delete(key)
-            this.stores.sets.delete(key)
-          }
-        })
+        commands.push(() => this.del(...keys))
         return this
       },
       exec: async () => {
-        commands.forEach((command) => command())
+        for (const command of commands) await command()
         return commands.map(() => [null, 'OK'])
       },
     }
@@ -209,7 +222,7 @@ export class FakeRedis {
     if (this.failFetch) throw new Error('fetch failed')
     let data = await this.get(dataKey)
     if (!data) return [null, 0]
-    const meta = this.stores.hashes.get(dataKey.replace(/data$/, 'meta')) || {}
+    const meta = await this.hgetall(dataKey.replace(/data$/, 'meta'))
     let freshUntil: number | undefined
     let revision: string | undefined
     if (data.startsWith('@ac-redis:1:')) {
@@ -268,6 +281,7 @@ export class FakeRedis {
       (!legacy || !barrier || !storedGeneration || writeToken !== [legacy, barrier, storedGeneration].join(':'))
     )
       return ['INVALIDATED', 0]
+    this.expireKey(dataKey + ':state')
     let old = this.stores.hashes.get(dataKey + ':state')
     const previousData = await this.get(dataKey)
     if (!old && previousData?.startsWith('@ac-redis:1:')) {
@@ -275,28 +289,20 @@ export class FakeRedis {
       old = { prefix: previous.prefix, tags: JSON.stringify(previous.tags), generation: previous.namespace }
     }
     for (const tag of JSON.parse(old?.tags || '[]')) {
+      this.expireKey((old?.prefix || '') + 'tag:' + tag)
+      this.expireKey((old?.prefix || '') + '__adaptive:tag-index:' + tag)
       this.stores.sets.get((old?.prefix || '') + 'tag:' + tag)?.delete(key)
       this.stores.sortedSets.get((old?.prefix || '') + '__adaptive:tag-index:' + tag)?.delete(key)
     }
     const generation = storedGeneration || uuid
     await this.setnx(prefix + '__adaptive:namespace', generation)
-    if (old && old.generation !== generation) this.stores.hashes.delete(metaKey)
+    if (old && old.generation !== generation) await this.del(metaKey)
     const epochs: Record<string, string> = {}
-    for (const tag of JSON.parse(tagsJSON)) {
-      const epochKey = prefix + '__adaptive:tag-epoch:' + tag
-      await this.setnx(epochKey, uuid)
-      epochs[epochKey] = (await this.get(epochKey))!
-      const epoch = this.stores.values.get(epochKey)!
-      epoch.expiresAt = Math.max(
-        epoch.expiresAt || 0,
-        Date.now() + Math.max(Number(metaTTLString), Number(maxTTLString) + Number(staleTTLString)) * 1000,
-      )
-    }
 
     const initialTTL = Number(initialTTLString)
     const maxTTL = Number(maxTTLString)
     const ttlScaling = Number(ttlScalingString)
-    const meta = this.stores.hashes.get(metaKey) || {}
+    const meta = await this.hgetall(metaKey)
     const calculated = calculateNextMetadata(
       { ...meta, ttlPolicyState: meta.ttlPolicyState ? JSON.parse(meta.ttlPolicyState) : undefined },
       hash,
@@ -316,7 +322,7 @@ export class FakeRedis {
       ...(calculated.ttlPolicyState ? { ttlPolicyState: JSON.stringify(calculated.ttlPolicyState) } : {}),
     })
     dataTTL = Math.min(dataTTL, maxTTL)
-    const freshTTL = dataTTL * Number(jitterFactor)
+    const freshTTL = Math.max(0.001, dataTTL * Number(jitterFactor))
     this.stores.hashes.set(dataKey + ':state', {
       prefix,
       tags: tagsJSON,
@@ -324,14 +330,25 @@ export class FakeRedis {
       freshUntil: String(Date.now() + freshTTL * 1000),
       revision: uuid,
     })
-    const retention = (freshTTL + Number(staleTTLString)) * 1000
+    const retention = Math.max(1, Math.floor((freshTTL + Math.max(0, Number(staleTTLString))) * 1000))
+    const tagTTL = Math.max(retention, Number(metaTTLString) * 1000)
+    await this.pexpire(dataKey + ':state', tagTTL)
     for (const tag of JSON.parse(tagsJSON)) {
+      const epochKey = prefix + '__adaptive:tag-epoch:' + tag
+      await this.setnx(epochKey, uuid)
+      epochs[epochKey] = (await this.get(epochKey))!
       const tagKey = prefix + '__adaptive:tag-index:' + tag
+      this.expireKey(tagKey)
       const members = this.stores.sortedSets.get(tagKey) || new Map<string, number>()
       let pruned = 0
       for (const [member, expiry] of members) if (expiry <= Date.now() && pruned++ < 100) members.delete(member)
       members.set(key, Date.now() + retention)
       this.stores.sortedSets.set(tagKey, members)
+      for (const retainedKey of [epochKey, tagKey]) {
+        if ((this.stores.expiresAt.get(retainedKey) || 0) < Date.now() + tagTTL) {
+          await this.pexpire(retainedKey, tagTTL)
+        }
+      }
     }
     await this.set(dataKey + ':revision', uuid, 'PX', retention)
     await this.set(
@@ -347,9 +364,9 @@ export class FakeRedis {
           tags: JSON.parse(tagsJSON),
         }),
       'PX',
-      (freshTTL + Number(staleTTLString)) * 1000,
+      retention,
     )
-    await this.set(metaKey + ':ttl-marker', '1', 'EX', Number(metaTTLString))
+    await this.expire(metaKey, Number(metaTTLString))
 
     return ['CACHED', dataTTL, lastChanged, changeCount, hash, isChanged ? 1 : 0]
   }
@@ -381,12 +398,15 @@ export class FakeRedis {
         [prefix + '__adaptive:tag-index:' + tag, 'zset'],
         [prefix + 'tag:' + tag, 'set'],
       ]) {
+        this.expireKey(source)
         const target = source + ':invalidated:' + namespaceUUID
         const store = kind === 'set' ? this.stores.sets : this.stores.sortedSets
         const members = store.get(source)
         if (members?.size) {
           ;(store as Map<string, unknown>).set(target, members)
           store.delete(source)
+          this.stores.expiresAt.delete(source)
+          await this.pexpire(target, 60000)
           detached.push(tag, target, kind, String(members.size))
         }
       }
@@ -395,6 +415,7 @@ export class FakeRedis {
   }
 
   private async removeEntry(member: string) {
+    this.expireKey(member + 'data:state')
     let state = this.stores.hashes.get(member + 'data:state')
     const data = await this.get(member + 'data')
     if (!state && data?.startsWith('@ac-redis:1:')) {
@@ -402,6 +423,8 @@ export class FakeRedis {
       state = { prefix: envelope.prefix, tags: JSON.stringify(envelope.tags) }
     }
     for (const tag of JSON.parse(state?.tags || '[]')) {
+      this.expireKey((state?.prefix || '') + 'tag:' + tag)
+      this.expireKey((state?.prefix || '') + '__adaptive:tag-index:' + tag)
       this.stores.sets.get((state?.prefix || '') + 'tag:' + tag)?.delete(member)
       this.stores.sortedSets.get((state?.prefix || '') + '__adaptive:tag-index:' + tag)?.delete(member)
     }
@@ -420,6 +443,7 @@ export class FakeRedis {
         const envelope = JSON.parse(data.slice('@ac-redis:1:'.length))
         remove = envelope.epochs[epochKey] !== undefined && envelope.epochs[epochKey] !== epoch
       } else {
+        this.expireKey(member + 'data:state')
         const state = this.stores.hashes.get(member + 'data:state')
         if (state) remove = JSON.parse(state.tags).includes(tag)
       }
@@ -487,9 +511,9 @@ export class FakeRedis {
   }
 
   private async ttl(key: string) {
-    const entry = this.stores.values.get(key)
-    if (!entry) return -2
-    if (!entry.expiresAt) return -1
-    return Math.max(0, Math.ceil((entry.expiresAt - Date.now()) / 1000))
+    if (!(await this.exists(key))) return -2
+    const expiresAt = this.stores.expiresAt.get(key)
+    if (expiresAt === undefined) return -1
+    return Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000))
   }
 }

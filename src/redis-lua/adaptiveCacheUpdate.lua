@@ -156,6 +156,6 @@ redis.call('SET', dataKey .. ':revision', uuid, 'PX', retentionMs)
 local envelope = {revision = uuid, data = data, prefix = prefix, namespace = generation, freshUntil = nowMs + math.floor(freshTTL * 1000), epochs = epochs, tags = cjson.decode(tags)}
 redis.call('SET', dataKey, '@ac-redis:1:' .. cjson.encode(envelope), 'PX', retentionMs)
 
--- RESP numeric replies truncate fractions. Preserve new-policy caps as decimal text.
-local resultTTL = policy.type == 'adaptive' and dataTTL or string.format('%.17g', dataTTL)
+-- RESP numeric replies truncate fractions. Preserve every policy's TTL as decimal text.
+local resultTTL = string.format('%.17g', dataTTL)
 return {'CACHED', resultTTL, lastChanged, changeCount, hash, isChanged and 1 or 0}
